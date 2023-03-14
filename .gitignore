@@ -1,2 +1,3 @@
-__pycache__/
-eodfundeq.egg-info/
+__pycache__
+*.egg-info/
+

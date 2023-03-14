@@ -1,4 +1,0 @@
-eodhistdata
-numpy
-pandas
-setuptools-git

@@ -1,2 +1,0 @@
-eodfundeq
-tests
