@@ -405,14 +405,16 @@ class StockFeatureAnalyzer(object):
     def get_bucket_summary_for_momentum(self, 
                                         momentum_windows, 
                                         return_windows,
-                                        lags=(1,)):
+                                        lags=()):
         lags = sorted(list(set(lags) | set([0])))
         results = dict()
         for momentum_window in momentum_windows:
             for lag in lags:
                 if lag < momentum_window:
                     mom_ts = featureObj.get_momentum(momentum_window, lag=lag)
-                    key = f'mom_{momentum_window}m{lag}'
+                    key = f'mom_{momentum_window}m'
+                    if lag > 0:
+                        key += str(lag)
                     results[key] = self.get_bucketed_returns_summary(
                         mom_ts, return_windows=return_windows)
         return results    
