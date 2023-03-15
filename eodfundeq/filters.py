@@ -29,7 +29,7 @@ class EqualFilter(AbstractFilter):
 
 
 class InRangeFilter(AbstractFilter):
-    def __init__(self, low: float = -np.inf, high: float = np.inf,
+    def __init__(self, instance, property_name, low: float = -np.inf, high: float = np.inf,
                  low_inc: bool = True, high_inc: bool = True):
         super(InRangeFilter, self).__init__(instance, property_name)
         self.low = low
@@ -52,6 +52,34 @@ class InRangeFilter(AbstractFilter):
             else:
                 return (self.low < self.property_values) & \
                        (self.property_values < self.high)
+
+
+class EntireColumnInRangeFilter(InRangeFilter):
+    def __init__(self, instance, property_name, low: float = -np.inf, high: float = np.inf,
+                 low_inc: bool = True, high_inc: bool = True, ignore_na: bool = True):
+        super(EntireColumnInRangeFilter, self).__init__(instance, property_name,
+            low=low, high=high, low_inc=low_inc, high_inc=high_inc)
+        self.ignore_na = ignore_na
+
+    def get_mask(self):
+        super_mask = super().get_mask()
+        if self.ignore_na:
+            super_mask |= np.isnan(self.property_values)
+        return np.all(super_mask, axis=0).reshape(1, -1)
+
+
+class EntireRowInRangeFilter(InRangeFilter):
+    def __init__(self, instance, property_name, low: float = -np.inf, high: float = np.inf,
+                 low_inc: bool = True, high_inc: bool = True, ignore_na: bool = True):
+        super(EntireRowInRangeFilter, self).__init__(instance, property_name,
+            low=low, high=high, low_inc=low_inc, high_inc=high_inc)
+        self.ignore_na = ignore_na
+
+    def get_mask(self):
+        super_mask = super().get_mask()
+        if self.ignore_na:
+            super_mask |= np.isnan(self.property_values)
+        return np.all(super_mask, axis=1).reshape(-1, 1)
 
 
 class IsNotNAFilter(AbstractFilter):

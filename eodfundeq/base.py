@@ -13,16 +13,18 @@ from typing import Optional
 import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
 
+from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
 from eodfundeq import utils
 from eodfundeq.constants import ReturnTypes, DataSetTypes, FinancialStatementTypes, \
-    FundamentalRatios, FundamentalRatioInputs, FINANCIAL_DATA_TYPE_MAP
+    FundamentalRatios, FundamentalRatioInputs, TimeSeriesNames, FINANCIAL_DATA_TYPE_MAP
 from eodhistdata import EODHelper, FundamentalEquityData
 
 
 class StockFeatureAnalyzer(object):
     periods_per_year = 12
 
-    def __init__(self, api_token, base_path, start, end='', n_val_periods=24, n_test_periods=24, 
+    def __init__(self, api_token, base_path, start, end='', symbols=None, 
+                 n_val_periods=24, n_test_periods=24, 
                  stale_days=120, dataset_type=DataSetTypes.TRAIN.value):
         self.eod_helper = EODHelper(api_token=api_token, base_path=base_path)
 
@@ -41,7 +43,11 @@ class StockFeatureAnalyzer(object):
         self.end_str = self.end.strftime('%Y-%m-%d')
 
         self.dates = pd.date_range(self.start, self.end, freq='M')
-        self.symbols = self.eod_helper.get_non_excluded_exchange_symbols('US')[:500]
+        if symbols is None:
+            self.symbols = self.eod_helper.get_non_excluded_exchange_symbols('US')
+        else:
+            self.symbols = symbols
+
         self._time_series = dict()
         self._market_cap = None
         
@@ -55,8 +61,8 @@ class StockFeatureAnalyzer(object):
         # Initialize financial statement data types
         self.fin_data_types = FINANCIAL_DATA_TYPE_MAP.copy()
         
-        # Initialize all indices to True
-        self.good_index = self._create_data_panel(dtype=bool)
+        # Initialize mask that will tell us if data points are valid
+        self._good_mask = None
 
         # Specify which data set type we want to work with (train, validation, test)
         self.dataset_type = dataset_type
@@ -66,11 +72,13 @@ class StockFeatureAnalyzer(object):
         self.n_buckets = 5              # How many buckets to use for metric sort
         self.fundamental_data_delay = 1 # Months to delay use of fundamental data, to account for
                                         # the fact that it is not immediately available for trading. 
-        # Excludes dates/metrics with few observations
-        self.filter_min_obs = int(self.n_symbols / (self.n_dates / 12 / 5) / self.n_buckets / 3)
+        self.filter_min_obs = 10        # Excludes dates/metrics with few observations
         self.filter_min_price = 1       # Excludes stocks with too low of a price
         self.filter_min_monthly_volume = 21 * 5000  # Exclude stocks with low trading volume
         self.filter_max_return = 100  # Excludes return outliers from sample
+
+        # Set default filters
+        self.set_default_filters()
 
     def _create_data_rows(self, n_rows, dtype=np.float32):
         return np.ones((n_rows, self.n_symbols), dtype=dtype)
@@ -91,7 +99,9 @@ class StockFeatureAnalyzer(object):
                 return self._date_map_pd[pd.Timestamp(date) + pd.tseries.offsets.MonthEnd(0)]
 
     def load_time_series(self):
-        data_cols = {'close': np.nan, 'adjusted_close': np.nan, 'volume': 0.0}
+        data_cols = {TimeSeriesNames.CLOSE.value: np.nan,
+                     TimeSeriesNames.ADJUSTED_CLOSE.value: np.nan,
+                     TimeSeriesNames.VOLUME.value: 0.0}
         for col, default_val in data_cols.items():
             self._time_series[col] = default_val * self._create_data_panel(dtype=np.float32)
 
@@ -114,25 +124,37 @@ class StockFeatureAnalyzer(object):
             for col in data_cols.keys():
                 self._time_series[col][idx_date:idx_date+L, idx_symbol] = monthly_ts[col].values
         
-        self.good_index = \
-            self.good_index & \
-            ~np.isnan(self.close) & \
-            (self.close > self.filter_min_price) & \
-            ~np.isnan(self.adjusted_close) & \
-            (self.adjusted_close > self.filter_min_price) & \
-            ~np.isnan(self.volume) & \
-            (self.volume > self.filter_min_monthly_volume)
-
-        # Remove all series completely if there is a suspicious monthly return
-        monthly_returns = self.get_future_returns(1)
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')        
-            idx_high_return = np.nanmax(np.abs(monthly_returns), axis=0) > self.filter_max_return
-        self.good_index[:, idx_high_return] = False
-        
         # Fill non-trailing NaNs in close and adjusted_close time series
-        self._time_series['close'] = utils.ffill(self._time_series['close'])
-        self._time_series['adjusted_close'] = utils.ffill(self._time_series['adjusted_close'])
+        self._time_series[TimeSeriesNames.CLOSE.value] = \
+            utils.ffill(self._time_series[TimeSeriesNames.CLOSE.value])
+        self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value] = \
+            utils.ffill(self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value])
+        
+        # Also add monthly returns
+        self._time_series[TimeSeriesNames.MONTHLY_RETURNS.value] = self.get_future_returns(1)
+
+    def set_default_filters(self):
+        self._good_mask = None
+        self._filters = [
+            IsNotNAFilter(self, TimeSeriesNames.CLOSE.value),
+            IsNotNAFilter(self, TimeSeriesNames.ADJUSTED_CLOSE.value),
+            IsNotNAFilter(self, TimeSeriesNames.VOLUME.value),
+            InRangeFilter(self, TimeSeriesNames.CLOSE.value,
+                          low=self.filter_min_price),
+            InRangeFilter(self, TimeSeriesNames.ADJUSTED_CLOSE.value,
+                          low=self.filter_min_price),
+            InRangeFilter(self, TimeSeriesNames.VOLUME.value,
+                          low=self.filter_min_monthly_volume),
+            EntireColumnInRangeFilter(self, TimeSeriesNames.MONTHLY_RETURNS.value,
+                                      high=self.filter_max_return)
+        ]
+
+    def reset_default_filters(self):
+        self.set_default_filters()
+
+    def add_filter(self, f):
+        self._good_mask = None
+        self._filters.append(f)
 
     @property
     def n_dates(self):
@@ -167,23 +189,42 @@ class StockFeatureAnalyzer(object):
         return self._dataset_mask
         
     @property
+    def filters(self):
+        return self._filters
+
+    @property
+    def good_mask(self):
+        if self._good_mask is None:
+            self._good_mask = self._create_data_panel(dtype=bool)
+            for f in self.filters:
+                self._good_mask &= f.get_mask()
+
+        return self._good_mask
+
+    @property
     def adjusted_close(self):
         if not len(self._time_series):
             self.load_time_series()
-        return self._time_series['adjusted_close']
+        return self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value]
         
     @property
     def close(self):
         if not len(self._time_series):
             self.load_time_series()
-        return self._time_series['close']
+        return self._time_series[TimeSeriesNames.CLOSE.value]
         
     @property
     def volume(self):
         if not len(self._time_series):
             self.load_time_series()
-        return self._time_series['volume']
+        return self._time_series[TimeSeriesNames.VOLUME.value]
 
+    @property
+    def monthly_returns(self):
+        if not len(self._time_series):
+            self.load_time_series()
+        return self._time_series[TimeSeriesNames.MONTHLY_RETURNS.value]
+        
     @property
     def market_cap(self):
         if self._market_cap is None:
@@ -316,7 +357,7 @@ class StockFeatureAnalyzer(object):
         for idx_date in range(self.n_dates):
             idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
                        ~np.isnan(return_vals[idx_date,:]) & \
-                       self.good_index[idx_date,:] & \
+                       self.good_mask[idx_date,:] & \
                        self.dataset_mask[idx_date, :]
 
             metric_row = metric_vals[idx_date, idx_keep]
@@ -411,7 +452,7 @@ class StockFeatureAnalyzer(object):
         for momentum_window in momentum_windows:
             for lag in lags:
                 if lag < momentum_window:
-                    mom_ts = featureObj.get_momentum(momentum_window, lag=lag)
+                    mom_ts = self.get_momentum(momentum_window, lag=lag)
                     key = f'mom_{momentum_window}m'
                     if lag > 0:
                         key += str(lag)
@@ -421,7 +462,7 @@ class StockFeatureAnalyzer(object):
     
     def get_bucket_summary_for_valuation(self, return_windows, fillna=False):
         results = dict()
-        earnings_yield = featureObj.get_earnings_yield(fillna=fillna)
+        earnings_yield = self.get_earnings_yield(fillna=fillna)
         results['earnings_yield'] = self.get_bucketed_returns_summary(
             earnings_yield, return_windows=return_windows)
         return results

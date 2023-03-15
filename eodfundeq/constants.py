@@ -4,6 +4,14 @@ from enum import Enum
 
 START_DATE = '1999-12-31'
 
+class TimeSeriesNames(Enum):
+    """Enum with names of some important time series."""
+    ADJUSTED_CLOSE = 'adjusted_close'
+    CLOSE = 'close'
+    MARKET_CAP = 'market_cap'
+    MONTHLY_RETURNS = 'monthly_returns'
+    VOLUME = 'volume'
+
 
 class ReturnTypes(Enum):
     """An Enum class enumerating the various available return types."""
