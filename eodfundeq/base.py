@@ -64,6 +64,9 @@ class StockFeatureAnalyzer(object):
         # Initialize mask that will tell us if data points are valid
         self._good_mask = None
 
+        # Initialize container for caching calculated fundamental ratios
+        self._fundamental_ratios = None        
+
         # Specify which data set type we want to work with (train, validation, test)
         self.dataset_type = dataset_type
         
@@ -495,14 +498,17 @@ class StockFeatureAnalyzer(object):
     
     def get_bucket_summary_for_fundamental_ratios(self, return_windows, fillna=False,
                                                   n_periods=None, min_obs=4):
-        fin_data = self.get_financial_statement_data()
-        
+        if self._fundamental_ratios is None:
+            self._fundamental_ratios = dict()
+            fin_data = self.get_financial_statement_data()            
+            for ratio_type in FundamentalRatios:
+                self._fundamental_ratios[ratio_type.value] = self.calculate_fundamental_ratios(
+                    ratio_type.value, fin_data, n_periods=n_periods, min_obs=min_obs, fillna=fillna)
+
         results = dict()
-        for ratio_type in FundamentalRatios:            
-            ratio_vals = self.calculate_fundamental_ratios(ratio_type.value, 
-                fin_data, n_periods=n_periods, min_obs=min_obs, fillna=fillna)
+        for ratio_type in FundamentalRatios:
             results[ratio_type.value] = self.get_bucketed_returns_summary(
-                ratio_vals, return_windows=return_windows)
+                self._fundamental_ratios[ratio_type.value], return_windows=return_windows)
         return results
 
     def calculate_fundamental_ratios(self, ratio, fin_data, n_periods=None,
