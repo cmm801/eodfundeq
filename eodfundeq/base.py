@@ -354,7 +354,11 @@ class StockFeatureAnalyzer(object):
         bucketed_nobs = []
         high_vals = []
         low_vals = []
-        for idx_date in range(self.n_dates):
+
+        all_years = sorted(set([x.year for x in self.dates]))
+        annual_high_vals = {y: [] for y in all_years}
+        annual_low_vals = {y: [] for y in all_years}
+        for idx_date, date in enumerate(self.dates):
             idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
                        ~np.isnan(return_vals[idx_date,:]) & \
                        self.good_mask[idx_date,:] & \
@@ -384,32 +388,49 @@ class StockFeatureAnalyzer(object):
 
             bucketed_rtns.append(mean_rtns)
             bucketed_nobs.append(num_obs)
-            low_vals.append(return_row[idx_bin == 1].reshape(-1))
-            high_vals.append(return_row[idx_bin == self.n_buckets].reshape(-1))
+            period_low_vals = return_row[idx_bin == 1].reshape(-1)
+            period_high_vals = return_row[idx_bin == self.n_buckets].reshape(-1)
+            annual_high_vals[date.year].extend(period_high_vals)
+            annual_low_vals[date.year].extend(period_low_vals)
 
+        # First flatten the annual high/low values into a single array to calculate full t-stat
+        high_vals = [x for sublist in list(annual_high_vals.values()) for x in sublist]
+        low_vals = [x for sublist in list(annual_low_vals.values()) for x in sublist]
         high = np.hstack(high_vals) if len(high_vals) else np.array([])
         low = np.hstack(low_vals) if len(low_vals) else np.array([])
         if high.size & low.size:
-            tstat = scipy.stats.ttest_ind(high, low).statistic
+            overall_tstat = scipy.stats.ttest_ind(high, low).statistic
         else:
-            tstat = np.nan
-        return np.vstack(bucketed_rtns), np.vstack(bucketed_nobs), tstat
+            overall_tstat = np.nan
+
+        # Calculate t-stat on a each of the annual sets of high/low values
+        annual_tstat_vals = []
+        for year in all_years:
+            if len(annual_low_vals[year]) > 3:
+                t = scipy.stats.ttest_ind(annual_high_vals[year], annual_low_vals[year]).statistic
+                annual_tstat_vals.append(t)
+            else:
+                annual_tstat_vals.append(np.nan)
+        ann_tstat_ts = pd.Series(annual_tstat_vals, 
+                             index=pd.DatetimeIndex([f'{y}-12-31' for y in all_years]))
+
+        return np.vstack(bucketed_rtns), np.vstack(bucketed_nobs), ann_tstat_ts, overall_tstat
 
     def get_performance_ts(self, metric_vals, return_window):
-        period_rtns, num_obs, tstat = self.bucket_results(metric_vals, 
-                                                          return_window=return_window)
+        period_rtns, num_obs, ann_tstat_ts, overall_tstat = self.bucket_results(
+            metric_vals, return_window=return_window)
         idx_keep_rows = np.min(num_obs, axis=1) >= self.filter_min_obs
         period_rtns = period_rtns[idx_keep_rows, :]
         good_dates = self.dates[idx_keep_rows]
 
         if period_rtns.shape[0] == 0:
-            return pd.DataFrame(), pd.DataFrame(), np.nan
+            return pd.DataFrame(), pd.DataFrame(), ann_tstat_ts, np.nan
 
         # Convert to approximate monthly returns so we can compute hypothetical performance
         monthly_rtns = -1 + (1 + period_rtns) ** (1/return_window)
         perf_ts = pd.DataFrame(np.cumprod(1 + monthly_rtns, axis=0), index=good_dates)
         obs_ts = pd.DataFrame(num_obs[idx_keep_rows], index=good_dates)
-        return perf_ts, obs_ts, tstat
+        return perf_ts, obs_ts, ann_tstat_ts, overall_tstat
 
     def get_bucketed_returns_summary(self, metric_vals, return_windows: list):
         if return_windows is None:
@@ -420,7 +441,7 @@ class StockFeatureAnalyzer(object):
         ann_returns = dict()
         perf_ts = pd.DataFrame()  # Initialize this in case there is no data
         for window in return_windows:
-            perf_ts, obs_ts, tstat = self.get_performance_ts(
+            perf_ts, obs_ts, ann_tstat_ts, overall_tstat = self.get_performance_ts(
                 metric_vals, return_window=window)
             if not perf_ts.size:
                 continue
@@ -434,13 +455,18 @@ class StockFeatureAnalyzer(object):
                 low=bucket_means[0],
                 high=bucket_means[-1],
                 alpha=bucket_means[-1] - bucket_means[0],
-                tstat=tstat,
+                overall_tstat=overall_tstat,
+                tstat_25=ann_tstat_ts.quantile(0.25),
+                tstat_50=ann_tstat_ts.quantile(0.50),
+                tstat_75=ann_tstat_ts.quantile(0.75),
                 n_obs=np.sum(obs_ts.values),
                 min_obs=np.min(obs_ts.values),
                 n_dates=perf_ts.shape[0])
             ann_returns[window] = bucket_means
         results['summary'] = pd.DataFrame(res_map).T
         results['ann_returns'] = pd.DataFrame(ann_returns).T
+        results['perf_ts'] = perf_ts
+        results['tstat_ts'] = ann_tstat_ts
         return results
     
     def get_bucket_summary_for_momentum(self, 
