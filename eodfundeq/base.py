@@ -375,7 +375,6 @@ class StockFeatureAnalyzer(object):
                 bucketed_rtns.append([np.nan for _ in range(self.n_buckets)])
                 continue
 
-            assert np.max(return_row) < 100
             bins = np.quantile(metric_row, np.linspace(0, 1, self.n_buckets+1))
             bins[-1] += .01  # Hack to avoid max value being assigned to its own bucket
             idx_bin = np.digitize(metric_row, bins, right=False)
@@ -418,6 +417,20 @@ class StockFeatureAnalyzer(object):
                              index=pd.DatetimeIndex([f'{y}-12-31' for y in all_years]))
 
         return np.vstack(bucketed_rtns), np.vstack(bucketed_nobs), ann_tstat_ts, overall_tstat
+
+    def get_buckets(self, metric_vals):
+        buckets = np.nan * np.ones_like(metric_vals, dtype=np.int32)
+        for idx_date, date in enumerate(self.dates):
+            idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
+                       self.good_mask[idx_date,:] & \
+                       self.dataset_mask[idx_date, :]
+            metric_row = metric_vals[idx_date, idx_keep]
+            if not metric_row.size:
+                continue
+            bins = np.quantile(metric_row, np.linspace(0, 1, self.n_buckets+1))
+            bins[-1] += .01  # Hack to avoid max value being assigned to its own bucket
+            buckets[idx_date, idx_keep] = np.digitize(metric_row, bins, right=False)
+        return buckets
 
     def get_performance_ts(self, metric_vals, return_window):
         period_rtns, num_obs, ann_tstat_ts, overall_tstat = self.bucket_results(
