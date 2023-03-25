@@ -1,16 +1,10 @@
 """Definitions of important constants."""
 
 from enum import Enum
+from eodhistdata.constants import FundamentalDataTypes
+
 
 START_DATE = '1999-12-31'
-
-class TimeSeriesNames(Enum):
-    """Enum with names of some important time series."""
-    ADJUSTED_CLOSE = 'adjusted_close'
-    CLOSE = 'close'
-    MARKET_CAP = 'market_cap'
-    MONTHLY_RETURNS = 'monthly_returns'
-    VOLUME = 'volume'
 
 
 class ReturnTypes(Enum):
@@ -25,62 +19,55 @@ class DataSetTypes(Enum):
     VALIDATION = 'validation'
     TEST = 'test'
 
-    
-class FinancialStatementTypes(Enum):
-    """An Enum class containing financial statement types."""
-    INCOME_STATEMENT = 'Income_Statement'
-    BALANCE_SHEET = 'Balance_Sheet'    
-    CASH_FLOW_STATEMENT = 'Cash_Flow'
-
 
 class FundamentalRatios(Enum):
     """Enum class of the supported fundamental ratios."""
+    ASSETS_GROWTH = 'AssetGrowth'    
+    BOOK_TO_PRICE = 'BookToPrice'
+    BOOK_VALUE_GROWTH = 'BookValueGrowth'
+    CAPEX_GROWTH = 'CapExGrowth'
+    CASH_FLOW_MARGIN = 'CashFlowMargin'
+    CASH_FLOW_TO_NET_INCOME = 'CashFlowtoNetIncome'
+    EARNINGS_GROWTH = 'EarningsGrowth'
+    EARNINGS_TO_PRICE = 'EarningsToPrice'    
+    EBITDA_TO_EV = 'EBITDAToEV'
+    EQUITY_ISSUANCE = 'EquityIssuance'
+    FIXED_ASSETS_GROWTH = 'FixedAssetsGrowth'
+    FREE_CASH_FLOW_TO_EV = 'FreeCashFlowToEV'
+    FREE_CASH_FLOW_YIELD = 'FreeCashFlowYield'
+    GROSS_MARGIN = 'GrossMargin'
+    NET_DEBT_GROWTH = 'NetDebtGrowth'
+    NET_MARGIN = 'NetMargin'
+    NET_PAYOUT_YIELD = 'NetPayoutYield'
+    OPERATING_MARGIN = 'OperatingMargin'    
     ROA = 'ROA'
     ROE = 'ROE'
     ROIC = 'ROIC'
-    GROSS_MARGIN = 'GrossMargin'
-    OPERATING_MARGIN = 'OperatingMargin'
-    NET_MARGIN = 'NetMargin'
-    CASH_FLOW_MARGIN = 'CashFlowMargin'
-    CASH_FLOW_TO_NET_INCOME = 'CashFlowtoNetIncome'
-    EARNINGS_YIELD = 'EarningsYield'
+    SALES_TO_EV = 'SalesToEV'
+    SALES_TO_PRICE = 'SalesToPrice'
 
 
-class FundamentalRatioInputs(Enum):
-    """Enum class of fundamental data used as input for calculating ratios."""
-    EBIT = 'ebit'
-    FREE_CASH_FLOW = 'freeCashFlow'
-    GROSS_PROFIT = 'grossProfit'
-    INCOME_BEFORE_TAX = 'incomeBeforeTax'
-    INCOME_TAX_EXPENSE = 'incomeTaxExpense'
-    NET_INCOME = 'netIncome'
-    NET_INVESTED_CAPITAL = 'netInvestedCapital'
-    SHAREHOLDER_EQUITY = 'totalStockholderEquity'
-    TOTAL_ASSETS = 'totalAssets'    
-    TOTAL_REVENUE = 'totalRevenue'
-
-
-INCOME_STATEMENT_DATA_TYPES = (
-     FundamentalRatioInputs.EBIT.value,
-     FundamentalRatioInputs.GROSS_PROFIT.value,
-     FundamentalRatioInputs.INCOME_BEFORE_TAX.value,
-     FundamentalRatioInputs.INCOME_TAX_EXPENSE.value,
-     FundamentalRatioInputs.NET_INCOME.value,
-     FundamentalRatioInputs.TOTAL_REVENUE.value,
+"""Tuple of fundamental data used as input for calculating fundamental ratios."""
+FUNDAMENTAL_RATIO_INPUTS = (
+    FundamentalDataTypes.capitalExpenditures.value,
+    FundamentalDataTypes.cashAndEquivalents.value,
+    FundamentalDataTypes.commonStockSharesOutstanding.value,
+    FundamentalDataTypes.dividendsPaid.value,
+    FundamentalDataTypes.ebit.value,
+    FundamentalDataTypes.ebitda.value,
+    FundamentalDataTypes.dividendsPaid.value,
+    FundamentalDataTypes.freeCashFlow.value,
+    FundamentalDataTypes.grossProfit.value,
+    FundamentalDataTypes.incomeBeforeTax.value,
+    FundamentalDataTypes.incomeTaxExpense.value,
+    FundamentalDataTypes.longTermDebt.value,
+    FundamentalDataTypes.netDebt.value,
+    FundamentalDataTypes.netIncome.value,
+    FundamentalDataTypes.netInvestedCapital.value,
+    FundamentalDataTypes.propertyPlantEquipment.value,
+    FundamentalDataTypes.salePurchaseOfStock.value,
+    FundamentalDataTypes.shortTermDebt.value,
+    FundamentalDataTypes.totalStockholderEquity.value,
+    FundamentalDataTypes.totalAssets.value,
+    FundamentalDataTypes.totalRevenue.value,
 )
-        
-BALANCE_SHEET_DATA_TYPES = (
-    FundamentalRatioInputs.NET_INVESTED_CAPITAL.value,
-    FundamentalRatioInputs.TOTAL_ASSETS.value,
-    FundamentalRatioInputs.SHAREHOLDER_EQUITY.value,
-)
-
-CASH_FLOW_STATEMENT_DATA_TYPES = (
-    FundamentalRatioInputs.FREE_CASH_FLOW.value,
-)
-
-FINANCIAL_DATA_TYPE_MAP = {
-    FinancialStatementTypes.BALANCE_SHEET.value: BALANCE_SHEET_DATA_TYPES,
-    FinancialStatementTypes.CASH_FLOW_STATEMENT.value: CASH_FLOW_STATEMENT_DATA_TYPES,
-    FinancialStatementTypes.INCOME_STATEMENT.value: INCOME_STATEMENT_DATA_TYPES,
-}
