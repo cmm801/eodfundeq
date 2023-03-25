@@ -1,5 +1,7 @@
 import numpy as np
 
+from eodfundeq.constants import ReturnTypes
+
 
 def ffill(arr):
     """Method to front-fill NaNs in a numpy array."""
@@ -49,3 +51,23 @@ def rolling_sum(arr, n_periods, min_obs=None, fillna=True):
     if not fillna:
         roll_sum[np.isnan(arr)] = np.nan
     return roll_sum
+
+def rolling_return(arr, n_periods, return_type=None, fillna=True, tol=1e-6):
+    """Compute a rolling return of a numpy array."""
+    if return_type is None:
+        return_type = ReturnTypes.ARITHMETIC
+
+    if fillna:
+        arr = ffill(arr)
+
+    ratio =  arr[n_periods:,:] / (arr[:-n_periods,:] + tol)
+
+    if return_type == ReturnTypes.ARITHMETIC:
+        rtn_vals = -1 + ratio
+    elif return_type == ReturnTypes.LOG:
+        rtn_vals = np.log(ratio)        
+    else:
+        raise ValueError(f'Unknown return type: {return_type}.')
+
+    empty_rows = np.nan * np.ones((n_periods, arr.shape[1]), dtype=arr.dtype)
+    return np.vstack([empty_rows, rtn_vals])
