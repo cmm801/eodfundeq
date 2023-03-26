@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 
 from eodfundeq.constants import ReturnTypes
 
@@ -71,3 +72,13 @@ def rolling_return(arr, n_periods, return_type=None, fillna=True, tol=1e-6):
 
     empty_rows = np.nan * np.ones((n_periods, arr.shape[1]), dtype=arr.dtype)
     return np.vstack([empty_rows, rtn_vals])
+
+def calc_feature_percentiles(array):
+    """Calculate the percentiles across rows for an array of features."""
+    order = array.argsort()
+    ranks = order.argsort().astype(np.float32)
+    ranks[np.isnan(array)] = np.nan
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')
+        percentiles = ranks / np.nanmax(ranks, axis=1, keepdims=True)
+    return percentiles    
