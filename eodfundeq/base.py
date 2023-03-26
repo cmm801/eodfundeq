@@ -6,7 +6,6 @@ This file contains the core logic used for the analysis.
 import numpy as np
 import pandas as pd
 import scipy.stats
-import warnings
 
 from typing import Optional
 
@@ -25,10 +24,8 @@ class StockFeatureAnalyzer(object):
 
     def __init__(self, api_token, base_path, start, end='', symbols=None, 
                  n_val_periods=24, n_test_periods=24, 
-                 stale_days=120, dataset_type=DataSetTypes.TRAIN.value):
+                 stale_days=120):
         self.eod_helper = EODHelper(api_token=api_token, base_path=base_path)
-
-        self._dataset_mask = None
         self.n_val_periods = n_val_periods        
         self.n_test_periods = n_test_periods
         self.stale_days = stale_days
@@ -38,7 +35,7 @@ class StockFeatureAnalyzer(object):
             self.end = pd.Timestamp.now().round('d') - pd.tseries.offsets.MonthEnd(1)
         else:
             self.end = pd.Timestamp(end)
-            
+
         self.start_str = self.start.strftime('%Y-%m-%d')
         self.end_str = self.end.strftime('%Y-%m-%d')
 
@@ -66,9 +63,6 @@ class StockFeatureAnalyzer(object):
 
         # Initialize container for caching calculated fundamental ratios
         self._fundamental_ratios = None        
-
-        # Specify which data set type we want to work with (train, validation, test)
-        self.dataset_type = dataset_type
         
         # Other parameters
         self.price_tol = 1e-4           # Used to make sure we don't divide by 0
@@ -166,30 +160,6 @@ class StockFeatureAnalyzer(object):
     @property
     def n_symbols(self):
         return len(self.symbols)
-
-    @property
-    def dataset_type(self):
-        return self._dataset_type
-    
-    @dataset_type.setter
-    def dataset_type(self, dst):
-        self._dataset_mask = None
-        self._dataset_type = dst
-
-    @property
-    def dataset_mask(self):
-        if self._dataset_mask is None:
-            self._dataset_mask = self._create_data_panel(bool)
-            if self.dataset_type == DataSetTypes.TRAIN.value:
-                N = self.n_test_periods + self.n_val_periods
-                self._dataset_mask[-N:, :] = False
-            elif self.dataset_type == DataSetTypes.VALIDATION.value:
-                N = self.n_test_periods
-                self._dataset_mask[-N:, :] = False    
-            elif self.dataset_type != DataSetTypes.TEST.value:
-                raise ValueError(f'Unsupported dataset type: {self.dataset_type}')
-                
-        return self._dataset_mask
         
     @property
     def filters(self):
@@ -326,8 +296,10 @@ class StockFeatureAnalyzer(object):
                 fin_data[fin_data_type][idx[idx < self.n_dates], idx_symbol] = ts.values[idx < self.n_dates]
         return fin_data
 
-    def bucket_results(self, metric_vals, return_window):
-        return_vals = self.get_future_returns(return_window)
+    def bucket_results(self, metric_vals, return_window, clip=None):
+        if clip is None:
+            clip = (-np.inf, np.inf)
+        return_vals = np.clip(self.get_future_returns(return_window), *clip)
         assert metric_vals.shape == return_vals.shape, 'Shape of metric values must align with returns'
 
         bucketed_rtns = []
@@ -341,8 +313,7 @@ class StockFeatureAnalyzer(object):
         for idx_date, date in enumerate(self.dates):
             idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
                        ~np.isnan(return_vals[idx_date,:]) & \
-                       self.good_mask[idx_date,:] & \
-                       self.dataset_mask[idx_date, :]
+                       self.good_mask[idx_date,:]
 
             metric_row = metric_vals[idx_date, idx_keep]
             return_row = return_vals[idx_date, idx_keep]
@@ -399,8 +370,7 @@ class StockFeatureAnalyzer(object):
         buckets = np.nan * np.ones_like(metric_vals, dtype=np.int32)
         for idx_date, date in enumerate(self.dates):
             idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
-                       self.good_mask[idx_date,:] & \
-                       self.dataset_mask[idx_date, :]
+                       self.good_mask[idx_date,:]
             metric_row = metric_vals[idx_date, idx_keep]
             if not metric_row.size:
                 continue
@@ -409,9 +379,9 @@ class StockFeatureAnalyzer(object):
             buckets[idx_date, idx_keep] = np.digitize(metric_row, bins, right=False)
         return buckets
 
-    def get_performance_ts(self, metric_vals, return_window):
+    def get_performance_ts(self, metric_vals, return_window, clip=None):
         period_rtns, num_obs, ann_tstat_ts, overall_tstat = self.bucket_results(
-            metric_vals, return_window=return_window)
+            metric_vals, return_window=return_window, clip=clip)
         idx_keep_rows = np.min(num_obs, axis=1) >= self.filter_min_obs
         period_rtns = period_rtns[idx_keep_rows, :]
         good_dates = self.dates[idx_keep_rows]
@@ -425,7 +395,8 @@ class StockFeatureAnalyzer(object):
         obs_ts = pd.DataFrame(num_obs[idx_keep_rows], index=good_dates)
         return perf_ts, obs_ts, ann_tstat_ts, overall_tstat
 
-    def get_bucketed_returns_summary(self, metric_vals, return_windows: list):
+    def get_bucketed_returns_summary(self, metric_vals, return_windows: list, 
+                                    clip: Optional[tuple] = None):
         if return_windows is None:
             return_windows = RETURN_WINDOWS
 
@@ -435,12 +406,12 @@ class StockFeatureAnalyzer(object):
         perf_ts = pd.DataFrame()  # Initialize this in case there is no data
         for window in return_windows:
             perf_ts, obs_ts, ann_tstat_ts, overall_tstat = self.get_performance_ts(
-                metric_vals, return_window=window)
+                metric_vals, return_window=window, clip=clip)
             if not perf_ts.size:
                 continue
 
             # Get the number of periods per year so we can annualize the cum. return
-            n_years = perf_ts.shape[0] / 12
+            n_years = perf_ts.shape[0] / self.periods_per_year
             bucket_means = (-1 + perf_ts ** (1/n_years)).tail(1).values[0]
 
             # Combine results into dict for output
@@ -461,11 +432,12 @@ class StockFeatureAnalyzer(object):
         results['perf_ts'] = perf_ts
         results['tstat_ts'] = ann_tstat_ts
         return results
-    
+
     def get_bucket_summary_for_momentum(self, 
                                         momentum_windows, 
                                         return_windows,
-                                        lags=()):
+                                        lags=(),
+                                        clip=None):
         lags = sorted(list(set(lags) | set([0])))
         results = dict()
         for momentum_window in momentum_windows:
@@ -476,12 +448,23 @@ class StockFeatureAnalyzer(object):
                     if lag > 0:
                         key += str(lag)
                     results[key] = self.get_bucketed_returns_summary(
-                        mom_ts, return_windows=return_windows)
+                        mom_ts, return_windows=return_windows, clip=clip)
         return results
+
+    def calc_fundamental_ratios(self, fillna=False, n_periods=None, min_obs=4):
+        if self._fundamental_ratios is None:
+            self._fundamental_ratios = dict()
+            fin_data = self.get_financial_statement_input_data()            
+            for ratio_type in FundamentalRatios:
+                self._fundamental_ratios[ratio_type.value] = self.calculate_fundamental_ratios(
+                    ratio_type.value, fin_data, n_periods=n_periods, min_obs=min_obs, fillna=fillna)
+        return self._fundamental_ratios
 
     def get_bucket_summary_for_fundamental_ratios(self, return_windows, fillna=False,
                                                   n_periods=None, min_obs=4):
         if self._fundamental_ratios is None:
+            self.calc_fundamental_ratios(fillna=fillna, 
+                n_periods=n_periods, min_obs=min_obs)
             self._fundamental_ratios = dict()
             fin_data = self.get_financial_statement_input_data()            
             for ratio_type in FundamentalRatios:
@@ -628,7 +611,7 @@ class StockFeatureAnalyzer(object):
             sales = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.totalRevenue.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
-            return sales / (ev + eps)
+            return sales / (self.market_cap + eps)
         elif ratio == FundamentalRatios.BOOK_TO_PRICE.value:
             book_value = fin_data[FundamentalDataTypes.totalStockholderEquity.value]
             return book_value / (self.market_cap + eps)
