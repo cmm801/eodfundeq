@@ -23,12 +23,12 @@ class StockFeatureAnalyzer(object):
     periods_per_year = 12
 
     def __init__(self, api_token, base_path, start, end='', symbols=None, 
-                 n_val_periods=24, n_test_periods=24, 
-                 stale_days=120):
+                 n_val_periods=24, n_test_periods=24, stale_days=120, clip=None):
         self.eod_helper = EODHelper(api_token=api_token, base_path=base_path)
         self.n_val_periods = n_val_periods        
         self.n_test_periods = n_test_periods
         self.stale_days = stale_days
+        self.clip = clip if clip is not None else (-np.inf, np.inf)
 
         self.start = pd.Timestamp(start)
         if not end:
@@ -298,7 +298,7 @@ class StockFeatureAnalyzer(object):
 
     def bucket_results(self, metric_vals, return_window, clip=None):
         if clip is None:
-            clip = (-np.inf, np.inf)
+            clip = self.clip
         return_vals = np.clip(self.get_future_returns(return_window), *clip)
         assert metric_vals.shape == return_vals.shape, 'Shape of metric values must align with returns'
 
@@ -461,7 +461,7 @@ class StockFeatureAnalyzer(object):
         return self._fundamental_ratios
 
     def get_bucket_summary_for_fundamental_ratios(self, return_windows, fillna=False,
-                                                  n_periods=None, min_obs=4):
+                                                  n_periods=None, min_obs=4, clip=None):
         if self._fundamental_ratios is None:
             self.calc_fundamental_ratios(fillna=fillna, 
                 n_periods=n_periods, min_obs=min_obs)
@@ -474,7 +474,9 @@ class StockFeatureAnalyzer(object):
         results = dict()
         for ratio_type in FundamentalRatios:
             results[ratio_type.value] = self.get_bucketed_returns_summary(
-                self._fundamental_ratios[ratio_type.value], return_windows=return_windows)
+                self._fundamental_ratios[ratio_type.value], 
+                return_windows=return_windows,
+                clip=clip)
         return results
 
     def calculate_fundamental_ratios(self, ratio, fin_data, n_periods=None,
