@@ -46,6 +46,31 @@ class FundamentalRatios(Enum):
     SALES_TO_EV = 'SalesToEV'
     SALES_TO_PRICE = 'SalesToPrice'
 
+# Fundamental ratios that measure valuation of a stock
+VALUATION_RATIOS = (
+    FundamentalRatios.BOOK_TO_PRICE.value,
+    FundamentalRatios.EARNINGS_TO_PRICE.value,
+    FundamentalRatios.EBITDA_TO_EV.value,
+    FundamentalRatios.FREE_CASH_FLOW_TO_EV.value,
+    FundamentalRatios.SALES_TO_EV.value,
+    FundamentalRatios.SALES_TO_PRICE.value,
+)
+
+# Fundamental ratios that measure profitability] of a company
+PROFITABILITY_RATIOS = (
+    FundamentalRatios.CASH_FLOW_MARGIN.value,
+    FundamentalRatios.GROSS_MARGIN.value,
+    FundamentalRatios.OPERATING_MARGIN.value,    
+    FundamentalRatios.ROA.value,
+    FundamentalRatios.ROE.value,
+    FundamentalRatios.ROIC.value,
+)
+
+PAYOUT_DILUTION_RATIOS = (
+    FundamentalRatios.EQUITY_ISSUANCE.value,
+    FundamentalRatios.NET_DEBT_GROWTH.value,
+    FundamentalRatios.NET_PAYOUT_YIELD.value,
+)
 
 """Tuple of fundamental data used as input for calculating fundamental ratios."""
 FUNDAMENTAL_RATIO_INPUTS = (
