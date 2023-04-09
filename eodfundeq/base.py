@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 import scipy.stats
 
-from typing import Optional
+from collections.abc import Iterable  
+from typing import Optional, Union
 
 import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
@@ -17,6 +18,9 @@ from eodfundeq import utils
 from eodfundeq.constants import ReturnTypes, DataSetTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS
 from eodhistdata import EODHelper, FundamentalEquitySnapshot, FundamentalEquityTS
 from eodhistdata.constants import FundamentalDataTypes, TimeSeriesNames
+
+TRADING_DAYS_PER_MONTH = 21
+TRADING_DAYS_PER_YEAR = 252
 
 
 class StockFeatureAnalyzer(object):
@@ -61,6 +65,9 @@ class StockFeatureAnalyzer(object):
         # Initialize mask that will tell us if data points are valid
         self._good_mask = None
 
+        # Initialize container for caching calculated volatility
+        self._volatility = dict()
+
         # Initialize container for caching calculated fundamental ratios
         self._fundamental_ratios = None        
         
@@ -97,23 +104,24 @@ class StockFeatureAnalyzer(object):
 
     def load_time_series(self):
         data_cols = {TimeSeriesNames.CLOSE.value: np.nan,
-                     TimeSeriesNames.ADJUSTED_CLOSE.value: np.nan,
+                     TimeSeriesNames.ADJUSTED_CLOSE.value: np.nan,                 
                      TimeSeriesNames.VOLUME.value: 0.0}
         for col, default_val in data_cols.items():
             self._time_series[col] = default_val * self._create_data_panel(dtype=np.float32)
 
         for idx_symbol, symbol in enumerate(self.symbols):
-            raw_ts = self.eod_helper.get_historical_data(
+            daily_ts = self.eod_helper.get_historical_data(
                 symbol, start=self.start, stale_days=self.stale_days)
-            if not raw_ts.shape[0]:
+            if not daily_ts.shape[0]:
                 continue
 
-            monthly_ts = tradingutils.downsample(raw_ts, frequency='M')
+            monthly_ts = tradingutils.downsample(daily_ts, frequency='M')
             monthly_ts = monthly_ts.loc[(self.start <= monthly_ts.index) &
                                         (monthly_ts.index <= self.end)]
             if monthly_ts.shape[0] < 2:
                 continue
-            
+
+            # Add each time series' data to the respective panel
             idx_date = self._get_loc(monthly_ts.index[0])
             if idx_date < 0:
                 raise ValueError(f'Missing date: {monthly_ts.index[0]}')
@@ -128,7 +136,11 @@ class StockFeatureAnalyzer(object):
             utils.ffill(self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value])
         
         # Also add monthly returns
-        self._time_series[TimeSeriesNames.MONTHLY_RETURNS.value] = self.get_future_returns(1)
+        adj_close_panel = self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value]
+        self._time_series[TimeSeriesNames.MONTHLY_RETURNS.value] = np.vstack([
+            self._create_data_rows(1),
+            -1 + adj_close_panel[1:,:] / (adj_close_panel[:-1,:] + self.price_tol)
+        ])
 
     def set_default_filters(self):
         self._good_mask = None
@@ -252,6 +264,50 @@ class StockFeatureAnalyzer(object):
         return np.vstack([np.nan * self._create_data_rows(window),
                           mom_vals[:mom_vals.shape[0]-lag,:]])
 
+    def get_volatility(self, windows: Union[int, Iterable], return_type=ReturnTypes.LOG.value):
+        if not isinstance(windows, Iterable):
+            windows = [windows]
+
+        missing_windows = []
+        for window in windows:
+            vol_name = f'volatility_{window}m'
+            if vol_name not in self._volatility:
+                self._volatility[vol_name] = self._create_data_panel()
+                missing_windows.append(window)
+
+        if not missing_windows:
+            return self._volatility
+
+        for idx_symbol, symbol in enumerate(self.symbols):
+            daily_ts = self.eod_helper.get_historical_data(
+                symbol, start=self.start, stale_days=self.stale_days)
+            daily_ts = daily_ts.loc[(self.start <= daily_ts.index) &
+                                    (daily_ts.index <= self.end)]
+            if daily_ts.shape[0] < 2:
+                continue
+            
+            daily_price_ts = daily_ts[TimeSeriesNames.ADJUSTED_CLOSE.value]
+            if return_type == ReturnTypes.LOG.value:
+                daily_return_ts = np.log(daily_price_ts / (daily_price_ts.shift(1).values + self.price_tol))
+            elif return_type == ReturnTypes.ARITHMETIC.value:
+                daily_return_ts = -1 + daily_price_ts / (daily_price_ts.shift(1).values + self.price_tol)
+            else:
+                raise ValueError(f'Unsupported return type: {return_type}')
+
+            for vol_window in missing_windows:
+                vol_name = f'volatility_{vol_window}m'
+                w = vol_window * TRADING_DAYS_PER_MONTH
+                daily_vol_ts = daily_return_ts.rolling(w).std() * np.sqrt(TRADING_DAYS_PER_YEAR)
+                monthly_vol_ts = daily_vol_ts.resample('M').last()
+
+                # Add each time series' data to the respective panel
+                idx_date = self._get_loc(monthly_vol_ts.index[0])
+                if idx_date < 0:
+                    raise ValueError(f'Missing date: {monthly_vol_ts.index[0]}')
+                L = monthly_vol_ts.shape[0]
+                self._volatility[vol_name][idx_date:idx_date+L, idx_symbol] = monthly_vol_ts.values
+        return self._volatility
+
     def get_financial_statement_input_data(self):
         """Gather all required input data from financial statements.
         
@@ -269,7 +325,7 @@ class StockFeatureAnalyzer(object):
 
         # For each symbol in our universe, get time series for all required input data types
         for idx_symbol, symbol in enumerate(self.symbols):
-            fund_data = self.eod_helper.get_fundamental_equity(symbol)
+            fund_data = self.eod_helper.get_fundamental_equity(symbol, stale_days=self.stale_days)
             feq_ts_obj = FundamentalEquityTS(fund_data)
             full_ts = feq_ts_obj.get_time_series(self.fin_data_types)
             if not full_ts.size:
@@ -451,24 +507,24 @@ class StockFeatureAnalyzer(object):
                         mom_ts, return_windows=return_windows, clip=clip)
         return results
 
-    def calc_fundamental_ratios(self, fillna=False, n_periods=None, min_obs=4):
+    def calc_all_fundamental_ratios(self, fillna=False, n_periods=None, min_obs=4):
         if self._fundamental_ratios is None:
             self._fundamental_ratios = dict()
             fin_data = self.get_financial_statement_input_data()            
             for ratio_type in FundamentalRatios:
-                self._fundamental_ratios[ratio_type.value] = self.calculate_fundamental_ratios(
+                self._fundamental_ratios[ratio_type.value] = self.calculate_fundamental_ratio(
                     ratio_type.value, fin_data, n_periods=n_periods, min_obs=min_obs, fillna=fillna)
         return self._fundamental_ratios
 
     def get_bucket_summary_for_fundamental_ratios(self, return_windows, fillna=False,
                                                   n_periods=None, min_obs=4, clip=None):
         if self._fundamental_ratios is None:
-            self.calc_fundamental_ratios(fillna=fillna, 
+            self.calc_all_fundamental_ratios(fillna=fillna,
                 n_periods=n_periods, min_obs=min_obs)
             self._fundamental_ratios = dict()
             fin_data = self.get_financial_statement_input_data()            
             for ratio_type in FundamentalRatios:
-                self._fundamental_ratios[ratio_type.value] = self.calculate_fundamental_ratios(
+                self._fundamental_ratios[ratio_type.value] = self.calculate_fundamental_ratio(
                     ratio_type.value, fin_data, n_periods=n_periods, min_obs=min_obs, fillna=fillna)
 
         results = dict()
@@ -479,13 +535,13 @@ class StockFeatureAnalyzer(object):
                 clip=clip)
         return results
 
-    def calculate_fundamental_ratios(self, ratio, fin_data, n_periods=None,
+    def calculate_fundamental_ratio(self, ratio_name, fin_data, n_periods=None,
                                      min_obs=4, fillna=False):
         if n_periods is None:
             n_periods = self.periods_per_year
 
         eps = 1e-10
-        if ratio == FundamentalRatios.ROA.value:
+        if ratio_name == FundamentalRatios.ROA.value:
             net_income = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.netIncome.value], 
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
@@ -494,7 +550,7 @@ class StockFeatureAnalyzer(object):
             begin_period_assets = np.vstack([np.nan * self._create_data_rows(n_periods), 
                                             total_assets[:-n_periods,:]])
             return net_income / (begin_period_assets + eps)
-        elif ratio == FundamentalRatios.ROE.value:
+        elif ratio_name == FundamentalRatios.ROE.value:
             net_income = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.netIncome.value], 
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
@@ -502,7 +558,7 @@ class StockFeatureAnalyzer(object):
             begin_period_equity = np.vstack([np.nan * self._create_data_rows(n_periods),
                                             equity[:-n_periods,:]])
             return net_income / (begin_period_equity + eps)
-        elif ratio == FundamentalRatios.ROIC.value:
+        elif ratio_name == FundamentalRatios.ROIC.value:
             income_pre_tax = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.incomeBeforeTax.value], 
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
@@ -518,7 +574,7 @@ class StockFeatureAnalyzer(object):
             begin_period_capital = np.vstack([np.nan * self._create_data_rows(n_periods),
                                              capital[:-n_periods,:]])
             return nopat / (begin_period_capital + eps)
-        elif ratio == FundamentalRatios.GROSS_MARGIN.value:
+        elif ratio_name == FundamentalRatios.GROSS_MARGIN.value:
             gross_profit = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.grossProfit.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
@@ -526,7 +582,7 @@ class StockFeatureAnalyzer(object):
                 fin_data[FundamentalDataTypes.totalRevenue.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return gross_profit / (total_revenue + eps)
-        elif ratio == FundamentalRatios.OPERATING_MARGIN.value:
+        elif ratio_name == FundamentalRatios.OPERATING_MARGIN.value:
             ebit = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.ebit.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)        
@@ -534,7 +590,7 @@ class StockFeatureAnalyzer(object):
                 fin_data[FundamentalDataTypes.totalRevenue.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return ebit / (total_revenue + eps)
-        elif ratio == FundamentalRatios.NET_MARGIN.value:
+        elif ratio_name == FundamentalRatios.NET_MARGIN.value:
             net_income = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.netIncome.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
@@ -542,12 +598,12 @@ class StockFeatureAnalyzer(object):
                 fin_data[FundamentalDataTypes.totalRevenue.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return net_income / (total_revenue + eps)
-        elif ratio == FundamentalRatios.FREE_CASH_FLOW_YIELD.value:
+        elif ratio_name == FundamentalRatios.FREE_CASH_FLOW_YIELD.value:
             free_cash_flow = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.freeCashFlow.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return free_cash_flow / (self.market_cap + eps)
-        elif ratio == FundamentalRatios.CASH_FLOW_MARGIN.value:
+        elif ratio_name == FundamentalRatios.CASH_FLOW_MARGIN.value:
             free_cash_flow = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.freeCashFlow.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)        
@@ -555,7 +611,7 @@ class StockFeatureAnalyzer(object):
                 fin_data[FundamentalDataTypes.totalRevenue.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return free_cash_flow / (total_revenue + eps)
-        elif ratio == FundamentalRatios.CASH_FLOW_TO_NET_INCOME.value:
+        elif ratio_name == FundamentalRatios.CASH_FLOW_TO_NET_INCOME.value:
             free_cash_flow = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.freeCashFlow.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)        
@@ -563,74 +619,74 @@ class StockFeatureAnalyzer(object):
                 fin_data[FundamentalDataTypes.netIncome.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return free_cash_flow / (net_income + eps)
-        elif ratio == FundamentalRatios.NET_PAYOUT_YIELD.value:
+        elif ratio_name == FundamentalRatios.NET_PAYOUT_YIELD.value:
             net_payout = utils.rolling_sum(
                 self._calc_net_payout(fin_data), 
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return net_payout / (self.market_cap + eps)
-        elif ratio == FundamentalRatios.EQUITY_ISSUANCE.value:
+        elif ratio_name == FundamentalRatios.EQUITY_ISSUANCE.value:
             shares = fin_data[FundamentalDataTypes.commonStockSharesOutstanding.value]
             return utils.rolling_return(shares, n_periods=n_periods, fillna=fillna,
                                         return_type=ReturnTypes.ARITHMETIC)
-        elif ratio == FundamentalRatios.ASSETS_GROWTH.value:
+        elif ratio_name == FundamentalRatios.ASSETS_GROWTH.value:
             assets = fin_data[FundamentalDataTypes.totalAssets.value]
             return utils.rolling_return(assets, n_periods=n_periods, fillna=fillna, 
                                         return_type=ReturnTypes.ARITHMETIC)
-        elif ratio == FundamentalRatios.BOOK_VALUE_GROWTH.value:
+        elif ratio_name == FundamentalRatios.BOOK_VALUE_GROWTH.value:
             book_value = fin_data[FundamentalDataTypes.totalStockholderEquity.value]
             return utils.rolling_return(book_value, n_periods=n_periods, fillna=fillna, 
                                         return_type=ReturnTypes.ARITHMETIC)
-        elif ratio == FundamentalRatios.CAPEX_GROWTH.value:
+        elif ratio_name == FundamentalRatios.CAPEX_GROWTH.value:
             capex = fin_data[FundamentalDataTypes.capitalExpenditures.value]
             return utils.rolling_return(capex, n_periods=n_periods, fillna=fillna, 
                                         return_type=ReturnTypes.ARITHMETIC)
-        elif ratio == FundamentalRatios.EARNINGS_GROWTH.value:
+        elif ratio_name == FundamentalRatios.EARNINGS_GROWTH.value:
             earnings = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.netIncome.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return utils.rolling_return(earnings, n_periods=n_periods, fillna=fillna, 
                                         return_type=ReturnTypes.ARITHMETIC)
-        elif ratio == FundamentalRatios.FIXED_ASSETS_GROWTH.value:
+        elif ratio_name == FundamentalRatios.FIXED_ASSETS_GROWTH.value:
             ppe = fin_data[FundamentalDataTypes.propertyPlantEquipment.value]
             return utils.rolling_return(ppe, n_periods=n_periods, fillna=fillna, 
                                         return_type=ReturnTypes.ARITHMETIC)
-        elif ratio == FundamentalRatios.NET_DEBT_GROWTH.value:
+        elif ratio_name == FundamentalRatios.NET_DEBT_GROWTH.value:
             net_debt = fin_data[FundamentalDataTypes.netDebt.value]
             return utils.rolling_return(net_debt, n_periods=n_periods, fillna=fillna,
                                         return_type=ReturnTypes.ARITHMETIC)
-        elif ratio == FundamentalRatios.EARNINGS_TO_PRICE.value:
+        elif ratio_name == FundamentalRatios.EARNINGS_TO_PRICE.value:
             earnings = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.netIncome.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return earnings / (self.market_cap + eps)
-        elif ratio == FundamentalRatios.SALES_TO_EV.value:
+        elif ratio_name == FundamentalRatios.SALES_TO_EV.value:
             sales = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.totalRevenue.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             ev = self._calc_enterprise_value(fin_data)                
             return sales / (ev + eps)
-        elif ratio == FundamentalRatios.SALES_TO_PRICE.value:
+        elif ratio_name == FundamentalRatios.SALES_TO_PRICE.value:
             sales = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.totalRevenue.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             return sales / (self.market_cap + eps)
-        elif ratio == FundamentalRatios.BOOK_TO_PRICE.value:
+        elif ratio_name == FundamentalRatios.BOOK_TO_PRICE.value:
             book_value = fin_data[FundamentalDataTypes.totalStockholderEquity.value]
             return book_value / (self.market_cap + eps)
-        elif ratio == FundamentalRatios.EBITDA_TO_EV.value:
+        elif ratio_name == FundamentalRatios.EBITDA_TO_EV.value:
             ebitda = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.ebitda.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             ev = self._calc_enterprise_value(fin_data)
             return ebitda / (ev + eps)
-        elif ratio == FundamentalRatios.FREE_CASH_FLOW_TO_EV.value:
+        elif ratio_name == FundamentalRatios.FREE_CASH_FLOW_TO_EV.value:
             fcf = utils.rolling_sum(
                 fin_data[FundamentalDataTypes.freeCashFlow.value],
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
             ev = self._calc_enterprise_value(fin_data)
             return fcf / (ev + eps)
         else:
-            raise ValueError(f'Unsupported fundamental ratio: {ratio}')
+            raise ValueError(f'Unsupported fundamental ratio: {ratio_name}')
 
     def _calc_enterprise_value(self, fin_data):
         return self.market_cap \
