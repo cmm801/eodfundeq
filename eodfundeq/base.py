@@ -7,21 +7,42 @@ import numpy as np
 import pandas as pd
 import scipy.stats
 
-from collections.abc import Iterable  
+from collections.abc import Iterable
+from enum import Enum
 from typing import Optional, Union
 
 import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
 
-from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
 from eodfundeq import utils
 from eodfundeq.constants import ReturnTypes, DataSetTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS
+from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
+from eodfundeq.timeseriespanel import TimeSeriesPanel
+
 from eodhistdata import EODHelper, FundamentalEquitySnapshot, FundamentalEquityTS
 from eodhistdata.constants import FundamentalDataTypes, TimeSeriesNames
 
 TRADING_DAYS_PER_MONTH = 21
 TRADING_DAYS_PER_YEAR = 252
 
+
+class TSNames(Enum):
+    ADJUSTED_CLOSE = TimeSeriesNames.ADJUSTED_CLOSE.value
+    CLOSE = TimeSeriesNames.CLOSE.value
+    DAILY_PRICES = 'daily_prices'
+    MARKET_CAP = 'market_cap'
+    MONTHLY_RETURNS = 'monthly_returns'    
+    VOLUME = TimeSeriesNames.VOLUME.value
+
+
+TIME_SERIES_PANEL_INFO = {
+    TSNames.ADJUSTED_CLOSE.value: dict(default_val=np.nan, dtype=np.float32, frequency='m'),
+    TSNames.CLOSE.value: dict(default_val=np.nan, dtype=np.float32, frequency='m'),
+    TSNames.DAILY_PRICES.value: dict(default_val=np.nan, dtype=np.float32, frequency='b'),
+    TSNames.MARKET_CAP.value: dict(default_val=np.nan, dtype=np.float32, frequency='m'),    
+    TSNames.MONTHLY_RETURNS.value: dict(default_val=np.nan, dtype=np.float32, frequency='m'),
+    TSNames.VOLUME.value: dict(default_val=0.0, dtype=np.float32, frequency='m'),
+}
 
 class StockFeatureAnalyzer(object):
     periods_per_year = 12
@@ -49,8 +70,11 @@ class StockFeatureAnalyzer(object):
         else:
             self.symbols = symbols
 
+        # Initialize the time series panels
         self._time_series = dict()
-        self._market_cap = None
+
+        # Initialize cached time series data
+        self._cta_momentum_signals = None
         
         # initialize hash table to look up date locations
         self._date_map_pd = pd.Series([], dtype=int)
@@ -90,6 +114,10 @@ class StockFeatureAnalyzer(object):
     def _create_data_panel(self, dtype=np.float32):
         return self._create_data_rows(self.n_dates, dtype=dtype)
 
+    def _create_ts_panel(self, frequency, dtype=np.float32, default_val=None):
+        return TimeSeriesPanel(self.symbols, start=self.start, end=self.end,
+            frequency=frequency, dtype=dtype, default_val=default_val)
+
     def _get_loc(self, date):
         if isinstance(date, str):
             try:
@@ -102,12 +130,15 @@ class StockFeatureAnalyzer(object):
             except KeyError:
                 return self._date_map_pd[pd.Timestamp(date) + pd.tseries.offsets.MonthEnd(0)]
 
-    def load_time_series(self):
-        data_cols = {TimeSeriesNames.CLOSE.value: np.nan,
-                     TimeSeriesNames.ADJUSTED_CLOSE.value: np.nan,                 
-                     TimeSeriesNames.VOLUME.value: 0.0}
-        for col, default_val in data_cols.items():
-            self._time_series[col] = default_val * self._create_data_panel(dtype=np.float32)
+    def load_ohlcv_data(self):
+        ts_types = (TSNames.ADJUSTED_CLOSE, TSNames.CLOSE, TSNames.DAILY_PRICES,
+                    TSNames.MONTHLY_RETURNS, TSNames.VOLUME)
+        if np.all([t in self._time_series for t in ts_types]):
+            return  # Time series are already loaded
+
+        for name in ts_types:
+            kwargs = TIME_SERIES_PANEL_INFO[name.value]
+            self._time_series[name.value] = self._create_ts_panel(**kwargs)
 
         for idx_symbol, symbol in enumerate(self.symbols):
             daily_ts = self.eod_helper.get_historical_data(
@@ -115,6 +146,11 @@ class StockFeatureAnalyzer(object):
             if not daily_ts.shape[0]:
                 continue
 
+            # Add daily prices (adjusted closing price) to the panel
+            self._time_series[TSNames.DAILY_PRICES.value].add_time_series(
+                daily_ts[TSNames.ADJUSTED_CLOSE.value], idx_symbol)
+
+            # Downsample to monthly data (from daily)
             monthly_ts = tradingutils.downsample(daily_ts, frequency='M')
             monthly_ts = monthly_ts.loc[(self.start <= monthly_ts.index) &
                                         (monthly_ts.index <= self.end)]
@@ -122,39 +158,51 @@ class StockFeatureAnalyzer(object):
                 continue
 
             # Add each time series' data to the respective panel
-            idx_date = self._get_loc(monthly_ts.index[0])
-            if idx_date < 0:
-                raise ValueError(f'Missing date: {monthly_ts.index[0]}')
-            L = monthly_ts.shape[0]
-            for col in data_cols.keys():
-                self._time_series[col][idx_date:idx_date+L, idx_symbol] = monthly_ts[col].values
+            for ts_enum in (TSNames.ADJUSTED_CLOSE, TSNames.CLOSE, TSNames.VOLUME):
+                self._time_series[ts_enum.value].add_time_series(
+                    monthly_ts[ts_enum.value], idx_symbol)
         
         # Fill non-trailing NaNs in close and adjusted_close time series
-        self._time_series[TimeSeriesNames.CLOSE.value] = \
-            utils.ffill(self._time_series[TimeSeriesNames.CLOSE.value])
-        self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value] = \
-            utils.ffill(self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value])
+        self._time_series[TSNames.CLOSE.value].ffill()
+        self._time_series[TSNames.ADJUSTED_CLOSE.value].ffill()
         
         # Also add monthly returns
-        adj_close_panel = self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value]
-        self._time_series[TimeSeriesNames.MONTHLY_RETURNS.value] = np.vstack([
+        adj_close_panel = self._time_series[TSNames.ADJUSTED_CLOSE.value].data
+        self._time_series[TSNames.MONTHLY_RETURNS.value].set_data(np.vstack([
             self._create_data_rows(1),
             -1 + adj_close_panel[1:,:] / (adj_close_panel[:-1,:] + self.price_tol)
-        ])
+        ]))
+
+    def load_market_cap_data(self):
+        mc_name = TSNames.MARKET_CAP.value
+        kwargs = TIME_SERIES_PANEL_INFO[mc_name]
+        if mc_name in self._time_series:
+            return  # Time series already loaded
+        self._time_series[mc_name] = self._create_ts_panel(**kwargs)
+        for idx_symbol, symbol in enumerate(self.symbols):
+            raw_ts = self.eod_helper.get_market_cap(
+                symbol, start=self.start, stale_days=self.stale_days)
+            if not raw_ts.shape[0]:
+                continue
+            monthly_ts = raw_ts.resample('M').last()
+            monthly_ts = monthly_ts.loc[(self.start <= monthly_ts.index) &
+                                        (monthly_ts.index <= self.end)]
+            if monthly_ts.shape[0] > 2:
+                self._time_series[mc_name].add_time_series(monthly_ts, idx_symbol)
 
     def set_default_filters(self):
         self._good_mask = None
         self._filters = [
-            IsNotNAFilter(self, TimeSeriesNames.CLOSE.value),
-            IsNotNAFilter(self, TimeSeriesNames.ADJUSTED_CLOSE.value),
-            IsNotNAFilter(self, TimeSeriesNames.VOLUME.value),
-            InRangeFilter(self, TimeSeriesNames.CLOSE.value,
+            IsNotNAFilter(self, TSNames.CLOSE.value),
+            IsNotNAFilter(self, TSNames.ADJUSTED_CLOSE.value),
+            IsNotNAFilter(self, TSNames.VOLUME.value),
+            InRangeFilter(self, TSNames.CLOSE.value,
                           low=self.filter_min_price),
-            InRangeFilter(self, TimeSeriesNames.ADJUSTED_CLOSE.value,
+            InRangeFilter(self, TSNames.ADJUSTED_CLOSE.value,
                           low=self.filter_min_price),
-            InRangeFilter(self, TimeSeriesNames.VOLUME.value,
+            InRangeFilter(self, TSNames.VOLUME.value,
                           low=self.filter_min_monthly_volume),
-            EntireColumnInRangeFilter(self, TimeSeriesNames.MONTHLY_RETURNS.value,
+            EntireColumnInRangeFilter(self, TSNames.MONTHLY_RETURNS.value,
                                       high=self.filter_max_return)
         ]
 
@@ -189,50 +237,38 @@ class StockFeatureAnalyzer(object):
     @property
     def adjusted_close(self):
         if not len(self._time_series):
-            self.load_time_series()
-        return self._time_series[TimeSeriesNames.ADJUSTED_CLOSE.value]
+            self.load_ohlcv_data()
+        return self._time_series[TSNames.ADJUSTED_CLOSE.value].data
         
     @property
     def close(self):
         if not len(self._time_series):
-            self.load_time_series()
-        return self._time_series[TimeSeriesNames.CLOSE.value]
-        
+            self.load_ohlcv_data()
+        return self._time_series[TSNames.CLOSE.value].data
+
     @property
-    def volume(self):
+    def daily_prices(self):
         if not len(self._time_series):
-            self.load_time_series()
-        return self._time_series[TimeSeriesNames.VOLUME.value]
+            self.load_ohlcv_data()
+        return self._time_series[TSNames.DAILY_PRICES.value].data
 
     @property
     def monthly_returns(self):
         if not len(self._time_series):
-            self.load_time_series()
-        return self._time_series[TimeSeriesNames.MONTHLY_RETURNS.value]
-        
+            self.load_ohlcv_data()
+        return self._time_series[TSNames.MONTHLY_RETURNS.value].data
+
+    @property
+    def volume(self):
+        if not len(self._time_series):
+            self.load_ohlcv_data()
+        return self._time_series[TSNames.VOLUME.value].data
+
     @property
     def market_cap(self):
-        if self._market_cap is None:
-            self._market_cap = np.nan * self._create_data_panel()
-            for idx_symbol, symbol in enumerate(self.symbols):
-                raw_ts = self.eod_helper.get_market_cap(
-                    symbol, start=self.start, stale_days=self.stale_days)
-                if not raw_ts.shape[0]:
-                    continue
-
-                monthly_ts = raw_ts.resample('M').last()
-                monthly_ts = monthly_ts.loc[(self.start <= monthly_ts.index) &
-                                            (monthly_ts.index <= self.end)]
-                if monthly_ts.shape[0] < 2:
-                    continue
-
-                idx_date = self._get_loc(monthly_ts.index[0])
-                if idx_date < 0:
-                    raise ValueError(f'Missing date: {monthly_ts.index[0]}')
-                L = monthly_ts.shape[0]
-                self._market_cap[idx_date:idx_date+L, idx_symbol] = monthly_ts.values.reshape(-1)
-
-        return self._market_cap
+        if TSNames.MARKET_CAP.value not in self._time_series:
+            self.load_market_cap_data()
+        return self._time_series[TSNames.MARKET_CAP.value].data
     
     def get_future_returns(self, window, return_type=ReturnTypes.ARITHMETIC.value):
         levels = np.maximum(self.adjusted_close[window:, :], self.price_tol) /  \
@@ -250,7 +286,6 @@ class StockFeatureAnalyzer(object):
         if lag >= window:
             raise ValueError('Momentum lag must be less than the window length. '
                             f'Found window={window}, lag={lag}')
-
         eff_window = window - lag
         levels = np.maximum(self.adjusted_close[eff_window:, :], self.price_tol) /  \
             np.maximum(self.adjusted_close[:-eff_window, :], self.price_tol)
@@ -272,7 +307,7 @@ class StockFeatureAnalyzer(object):
         for window in windows:
             vol_name = f'volatility_{window}m'
             if vol_name not in self._volatility:
-                self._volatility[vol_name] = self._create_data_panel()
+                self._volatility[vol_name] = np.nan * self._create_data_panel()
                 missing_windows.append(window)
 
         if not missing_windows:
@@ -286,7 +321,7 @@ class StockFeatureAnalyzer(object):
             if daily_ts.shape[0] < 2:
                 continue
             
-            daily_price_ts = daily_ts[TimeSeriesNames.ADJUSTED_CLOSE.value]
+            daily_price_ts = daily_ts[TSNames.ADJUSTED_CLOSE.value]
             if return_type == ReturnTypes.LOG.value:
                 daily_return_ts = np.log(daily_price_ts / (daily_price_ts.shift(1).values + self.price_tol))
             elif return_type == ReturnTypes.ARITHMETIC.value:
@@ -698,3 +733,41 @@ class StockFeatureAnalyzer(object):
         divs = fin_data[FundamentalDataTypes.netIncome.value]
         sale_or_purchase_of_stock = fin_data[FundamentalDataTypes.salePurchaseOfStock.value]
         return divs - sale_or_purchase_of_stock
+
+    def get_cta_momentum_signals(self):
+        """Calculate the intermediate CTA Momentum signals following Baz et al for all symbols.
+
+        This function calculates the 16 intermediate momentum signals, following
+        the paper 'Dissecting Investment Strategies in the Cross Section and Time Series'
+        by Baz et al, published in 2015.
+        https://www.cmegroup.com/education/files/dissecting-investment-strategies-in-the-cross-section-and-time-series.pdf
+        """
+        if self._cta_momentum_signals is not None:
+            return self._cta_momentum_signals
+
+        self._cta_momentum_signals = dict()
+        for idx_symbol, symbol in enumerate(self.symbols):
+            daily_ts = self.eod_helper.get_historical_data(
+                symbol, start=self.start, stale_days=self.stale_days)
+            
+            daily_price_ts = daily_ts[TSNames.ADJUSTED_CLOSE.value]
+            df_signals = utils.calc_cta_momentum_signals(daily_price_ts)
+            df_signals = df_signals.loc[(self.start <= df_signals.index) &
+                                    (df_signals.index <= self.end)]
+
+            if df_signals.shape[0] < 2:
+                continue
+
+            # Add each time series' data to the respective panel
+            idx_date = self._get_loc(df_signals.index[0])
+            assert idx_date >= 0, 'Missing date'
+            L = df_signals.shape[0]
+
+            # Initialize a data panel for each sub-signal if necessary
+            if not len(self._cta_momentum_signals):
+                for col in df_signals.columns:
+                    self._cta_momentum_signals[col] = np.nan * self._create_data_panel()
+
+            for col in df_signals.columns:
+                self._cta_momentum_signals[col][idx_date:idx_date+L, idx_symbol] = df_signals[col].values
+        return self._cta_momentum_signals
