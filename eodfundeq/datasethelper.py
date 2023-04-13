@@ -66,20 +66,26 @@ class DatasetHelper():
     @property
     def datasets(self):
         if self._datasets is None:
-            self._datasets = dict(X=dict(), weight=dict(), volatility=dict(), 
-                                  year_month=dict(), symbol=dict(),
+            self._datasets = dict(X=dict(), year_month=dict(), symbol=dict(),
                                   y_class=dict(), y_reg=dict(), y_pct=dict(),
                                   y_class_norm=dict(), y_reg_norm=dict(), y_pct_norm=dict(),
                                  )
             dataset_masks = self.get_dataset_masks()
             dataset_features_lists = self._get_dataset_features_lists()
             future_returns = self.featureObj.get_future_returns(self.return_window)
+            if self.return_window == 1:
+                volatility = self.featureObj.get_volatility(63, min_obs=57)
+            elif self.return_window == 3:
+                volatility = self.featureObj.get_volatility(126, min_obs=115)
+            else:
+                raise NotImplementedError('The volatility window corresponding to this return window has not been chosen.')
 
             n_symbols = len(self.featureObj.symbols)
-            dates = self.featureObj.dates
+            dates = self.featureObj.dates['m']
             ym_int = np.array([x.year * 100 + x.month for x in dates])
             ym_panel = np.tile(ym_int.reshape(-1, 1), n_symbols)
             symbol_panel = np.tile(np.arange(n_symbols).reshape(-1, 1), len(dates)).T
+
             for dataset_type, mask in dataset_masks.items():
                 fut_rtns = future_returns.copy()
                 fut_rtns[~mask] = np.nan
@@ -88,7 +94,7 @@ class DatasetHelper():
                 pred_bkt = np.digitize(pred_pct, np.linspace(0, 1, self.featureObj.n_buckets+1)[:-1])
                 y_0 = pred_bkt[mask] - 1
 
-                fut_rtns_norm = fut_rtns / np.clip(self.volatility, 0.03, np.inf)
+                fut_rtns_norm = fut_rtns / np.clip(volatility, 0.03, np.inf)
                 bucketed_returns_norm = self.featureObj.get_buckets(fut_rtns_norm)
                 pred_pct_norm = utils.calc_feature_percentiles(bucketed_returns_norm)
                 pred_bkt_norm = np.digitize(pred_pct_norm, np.linspace(0, 1, self.featureObj.n_buckets+1)[:-1])
@@ -105,8 +111,6 @@ class DatasetHelper():
                 self._datasets['y_class_norm'][dataset_type] = y_0_norm[idx_no_nan].astype(int)
                 self._datasets['y_reg_norm'][dataset_type] = fut_rtns_norm[mask][idx_no_nan]
                 self._datasets['y_pct_norm'][dataset_type] = pred_pct_norm[mask][idx_no_nan]
-                self._datasets['weight'][dataset_type] = np.minimum(self.target_vol / np.clip(self.volatility, 0.03, np.inf)[mask][idx_no_nan], 1)
-                self._datasets['volatility'][dataset_type] = self.volatility[mask][idx_no_nan]
                 self._datasets['year_month'][dataset_type] = ym_panel[mask][idx_no_nan]
                 self._datasets['symbol'][dataset_type] = symbol_panel[mask][idx_no_nan]
                 assert ~np.any(np.isnan(fut_rtns[mask][idx_no_nan]))
@@ -145,14 +149,6 @@ class DatasetHelper():
         return self.datasets['symbol']
 
     @property
-    def weight(self):
-        return self.datasets['weight']
-
-    @property
-    def volatility(self):
-        return self.featureObj.get_volatility(3)['volatility_3m']
-
-    @property
     def year_month(self):
         return self.datasets['year_month']
 
@@ -167,9 +163,9 @@ class DatasetHelper():
         dataset_masks = dict()
         intervals = self.get_intervals()
         for dataset_type, interval in intervals.items():
-            dataset_mask = self.featureObj._create_data_panel(bool)
-            dataset_mask[(self.featureObj.dates < interval[0])] = False
-            dataset_mask[(self.featureObj.dates > interval[1])] = False
+            dataset_mask = self.featureObj._init_data_panel(bool)
+            dataset_mask[(self.featureObj.dates['m'] < interval[0])] = False
+            dataset_mask[(self.featureObj.dates['m'] > interval[1])] = False
             dataset_masks[dataset_type] = self.featureObj.good_mask & \
                                                dataset_mask & \
                                                vol_filter.get_mask()
@@ -196,7 +192,7 @@ class DatasetHelper():
         return groups
     
     def get_eval_set(self):
-        eval_set = dict(bull=[], bear=[], reg=[], pct=[], weights=[])
+        eval_set = dict(bull=[], bear=[], reg=[], pct=[])
         year_month_vals = self.year_month['validation']
         for ym in sorted(set(year_month_vals)):
             idx_ym = (ym == year_month_vals)
@@ -205,5 +201,4 @@ class DatasetHelper():
                                    self.featureObj.n_buckets - 1 - self.y_class_norm['validation'][idx_ym]))
             eval_set['reg'].append(self.y_reg['validation'][idx_ym])
             eval_set['pct'].append(self.y_pct['validation'][idx_ym])
-            eval_set['weights'].append(self.weight['validation'][idx_ym])
         return eval_set

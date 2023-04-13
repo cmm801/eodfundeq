@@ -1,6 +1,7 @@
 """Provide a set of classes to abstractly define filters on data sets."""
 
 import numpy as np
+import pandas as pd
 
 from abc import ABC, abstractmethod
 
@@ -65,7 +66,11 @@ class EntireColumnInRangeFilter(InRangeFilter):
         super_mask = super().get_mask()
         if self.ignore_na:
             super_mask |= np.isnan(self.property_values)
-        return np.all(super_mask, axis=0).reshape(1, -1)
+        if isinstance(super_mask, pd.DataFrame):
+            vals = np.all(super_mask, axis=0).values
+        else:
+            vals = np.all(super_mask, axis=0)
+        return vals.reshape(1, -1)
 
 
 class EntireRowInRangeFilter(InRangeFilter):
@@ -79,7 +84,11 @@ class EntireRowInRangeFilter(InRangeFilter):
         super_mask = super().get_mask()
         if self.ignore_na:
             super_mask |= np.isnan(self.property_values)
-        return np.all(super_mask, axis=1).reshape(-1, 1)
+        if isinstance(super_mask, pd.DataFrame):
+            vals = np.all(super_mask, axis=1).values
+        else:
+            vals = np.all(super_mask, axis=1)
+        return vals.reshape(-1, 1)
 
 
 class IsNotNAFilter(AbstractFilter):
