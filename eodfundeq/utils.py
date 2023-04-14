@@ -1,8 +1,12 @@
+import datetime
 import numpy as np
 import pandas as pd
 import warnings
 
+from pypfopt import HRPOpt
+
 from eodfundeq.constants import ReturnTypes
+from pyfintools.tools import optim
 
 
 def ffill(arr):
@@ -195,3 +199,44 @@ def calc_cta_momentum_signals(ts_prices):
     df_signals_daily.index = pd.DatetimeIndex(df_signals_daily.index)
     df_signals_daily.columns = signal_names
     return df_signals_daily.resample('M').last()
+
+def get_performance(ds_helper, model, n_stocks=100, dataset='validation', weighting='equal'):
+    year_month_vals = ds_helper.year_month[dataset]
+    
+    prices_ts = ds_helper.featureObj._time_series['daily_prices']
+    full_period_rtns = []
+    model_period_rtns = []
+    sorted_year_months = sorted(set(year_month_vals))
+    for ym in sorted_year_months:
+        idx_ym = (ym == year_month_vals)
+        y_score = model.predict(ds_helper.X[dataset][idx_ym,:])
+        idx_score = np.argsort(y_score)[-n_stocks:]
+        idx_symbol = ds_helper.featureObj.symbols[ds_helper.symbol[dataset][idx_ym][idx_score]]
+        
+        period_end = pd.Timestamp(datetime.datetime.strptime(str(ym), '%Y%m')) + pd.tseries.offsets.MonthEnd(0)
+        period_start = period_end - pd.Timedelta(91, unit='d')
+        idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
+        period_prices = prices_ts.loc[idx_period, idx_symbol]
+        rtns = np.log(np.maximum(period_prices, ds_helper.featureObj.price_tol) / \
+                      np.maximum(period_prices.shift(1), ds_helper.featureObj.price_tol))
+        rtns = rtns.iloc[1:,:]
+        rtns.fillna(0, inplace=True)
+        #print((rtns.std() * np.sqrt(252)).sort_values()[:5])
+        
+        if weighting == 'equal':
+            weights = np.ones((idx_score.size,)) / idx_score.size
+        elif weighting == 'hrp':        
+            hrp = HRPOpt(rtns)
+            hrp.optimize()
+            weights = pd.Series(hrp.clean_weights())
+        elif weighting == 'minvar':
+            weights, _ = optim.optimize_min_variance(np.cov(rtns.T))
+        else:
+            raise ValueError(f'Unsupported weighting scheme: {weighting}')
+
+        assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'
+        weights /= weights.sum()
+        true_rtns = ds_helper.y_reg[dataset][idx_ym]
+        model_period_rtns.append((weights * true_rtns[idx_score]).sum())
+        assert sorted_year_months.index(ym) != 9
+    return np.array(model_period_rtns)
