@@ -48,12 +48,14 @@ class StockFeatureAnalyzer(object):
     periods_per_year = 12
 
     def __init__(self, api_token, base_path, start, end='', symbols=None, 
-                 n_val_periods=24, n_test_periods=24, stale_days=120, clip=None):
+                 n_val_periods=24, n_test_periods=24, stale_days=120, clip=None, 
+                 drop_empty_ts=True):
         self.eod_helper = EODHelper(api_token=api_token, base_path=base_path)
         self.n_val_periods = n_val_periods        
         self.n_test_periods = n_test_periods
         self.stale_days = stale_days
         self.clip = clip if clip is not None else (-np.inf, np.inf)
+        self.drop_empty_ts = drop_empty_ts
 
         self.start = pd.Timestamp(start)
         if not end:
@@ -150,6 +152,10 @@ class StockFeatureAnalyzer(object):
 
             daily_ts = daily_ts.loc[(self.start <= daily_ts.index) & \
                                     (daily_ts.index <= self.end)]
+
+            # Clean data, removing bad prices
+            daily_ts = self._clean_ohlcv_data(daily_ts)
+
             # Add daily prices (adjusted closing price) to the panel
             idx_shared = daily_ts.index.isin(self.dates['b'])
             self._time_series[TSNames.DAILY_PRICES.value].loc[daily_ts.index[idx_shared], symbol] = \
@@ -170,6 +176,40 @@ class StockFeatureAnalyzer(object):
         adj_close = self._time_series[TSNames.ADJUSTED_CLOSE.value]
         self._time_series[TSNames.MONTHLY_RETURNS.value] = \
             -1 + adj_close / np.maximum(adj_close.shift(1).values, self.price_tol)
+
+        if self.drop_empty_ts:
+            self._drop_empty_time_series()
+
+    def _clean_ohlcv_data(self, daily_ts):
+        daily_ts = daily_ts.query('volume > 0')
+        spikes = True
+        while spikes:
+            prices = daily_ts.adjusted_close
+            down_spike_mask = \
+                (prices / np.maximum(prices.shift(1), self.price_tol) < 0.5) & \
+                (prices.shift(-1) / np.maximum(prices, self.price_tol) > 1.9) & \
+                ((prices.shift(1) > 1)) & \
+                ((prices.shift(-1) > 1))
+
+            up_spike_mask = \
+                (prices / np.maximum(prices.shift(1), self.price_tol) > 1.9) & \
+                (prices.shift(-1) / np.maximum(prices, self.price_tol) < 0.5) & \
+                ((prices.shift(1) > 1)) & \
+                ((prices.shift(-1) > 1))
+
+            mask = down_spike_mask.values | up_spike_mask.values
+            if not np.any(mask):
+                spikes = False
+            else:
+                daily_ts = daily_ts.loc[~mask]
+        return daily_ts
+
+    def _drop_empty_time_series(self):
+        valid_prices_per_symbol = (~np.isnan(self.daily_prices)).sum(axis=0).values
+        idx_good_symbol = valid_prices_per_symbol >= TRADING_DAYS_PER_YEAR 
+        self.symbols = self.symbols[idx_good_symbol]
+        for k, v in self._time_series.items():
+            self._time_series[k] = self._time_series[k].loc[:,self.symbols]
 
     def load_market_cap_data(self):
         mc_name = TSNames.MARKET_CAP.value
