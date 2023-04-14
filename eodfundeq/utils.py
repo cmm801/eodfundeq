@@ -238,5 +238,4 @@ def get_performance(ds_helper, model, n_stocks=100, dataset='validation', weight
         weights /= weights.sum()
         true_rtns = ds_helper.y_reg[dataset][idx_ym]
         model_period_rtns.append((weights * true_rtns[idx_score]).sum())
-        assert sorted_year_months.index(ym) != 9
     return np.array(model_period_rtns)
