@@ -1,5 +1,10 @@
+import datetime
 import numpy as np
 import pandas as pd
+
+from pypfopt import HRPOpt
+
+from pyfintools.tools import optim
 
 from eodfundeq.constants import START_DATE, DataSetTypes
 from eodfundeq import filters
@@ -74,9 +79,9 @@ class DatasetHelper():
             dataset_features_lists = self._get_dataset_features_lists()
             future_returns = self.featureObj.get_future_returns(self.return_window)
             if self.return_window == 1:
-                volatility = self.featureObj.get_volatility(63, min_obs=57)
+                volatility = self.featureObj.get_volatility(63, min_obs=60)
             elif self.return_window == 3:
-                volatility = self.featureObj.get_volatility(126, min_obs=115)
+                volatility = self.featureObj.get_volatility(126, min_obs=120)
             else:
                 raise NotImplementedError('The volatility window corresponding to this return window has not been chosen.')
 
@@ -202,3 +207,57 @@ class DatasetHelper():
             eval_set['reg'].append(self.y_reg['validation'][idx_ym])
             eval_set['pct'].append(self.y_pct['validation'][idx_ym])
         return eval_set
+
+    def get_performance(self, model, n_stocks=100, dataset='validation', weighting='equal'):
+        year_month_vals = self.year_month[dataset]
+        
+        prices_ts = self.featureObj.daily_prices
+        model_period_rtns = []
+        sorted_year_months = sorted(set(year_month_vals))
+        for ym in sorted_year_months:
+            idx_ym = (ym == year_month_vals)
+            y_score = model.predict(self.X[dataset][idx_ym,:])
+            idx_score = np.argsort(y_score)[-n_stocks:]
+            idx_symbol = self.featureObj.symbols[self.symbol[dataset][idx_ym][idx_score]]
+            
+            period_end = pd.Timestamp(datetime.datetime.strptime(str(ym), '%Y%m')) + pd.tseries.offsets.MonthEnd(0)
+            period_start = period_end - pd.Timedelta(91, unit='d')
+            idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
+            period_prices = prices_ts.loc[idx_period, idx_symbol]
+            rtns = np.log(np.maximum(period_prices, self.featureObj.price_tol) / \
+                        np.maximum(period_prices.shift(1), self.featureObj.price_tol))
+            rtns = rtns.iloc[1:,:]
+            assert np.isnan(rtns.values).sum(axis=0).max() < 10
+            rtns.fillna(0, inplace=True)
+            
+            if weighting == 'equal':
+                weights = np.ones((idx_score.size,)) / idx_score.size
+            elif weighting == 'hrp':        
+                hrp = HRPOpt(rtns)
+                hrp.optimize()
+                weights = pd.Series(hrp.clean_weights())
+            elif weighting == 'minvar':
+                weights, _ = optim.optimize_min_variance(np.cov(rtns.T), ub=0.05)
+            else:
+                raise ValueError(f'Unsupported weighting scheme: {weighting}')
+
+            assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'
+            weights /= weights.sum()
+            true_rtns = self.y_reg[dataset][idx_ym]
+            model_period_rtns.append((weights * true_rtns[idx_score]).sum())
+        return np.array(model_period_rtns)
+
+    def get_ndcg(self, model, n_stocks=100, dataset='validation'):
+        year_month_vals = self.year_month[dataset]    
+        prices_ts = self.featureObj.daily_prices
+        model_period_ndcg = []    
+        sorted_year_months = sorted(set(year_month_vals))
+        for ym in sorted_year_months:
+            idx_ym = (ym == year_month_vals)
+            y_score = model.predict(self.X[dataset][idx_ym,:])
+            true_bkt_norm = self.y_class_norm[dataset][idx_ym]        
+            ndcg_val = utils.calc_ndcg(true_bkt_norm, y_score, k=n_stocks, form='exp')
+            assert ndcg_val > 0
+            model_period_ndcg.append(ndcg_val)
+            
+        return np.array(model_period_ndcg)
