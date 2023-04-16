@@ -48,7 +48,7 @@ class StockFeatureAnalyzer(object):
     periods_per_year = 12
 
     def __init__(self, api_token, base_path, start, end='', symbols=None, 
-                 n_val_periods=24, n_test_periods=24, stale_days=120, clip=None, 
+                 n_val_periods=24, n_test_periods=24, stale_days=240, clip=None, 
                  drop_empty_ts=True):
         self.eod_helper = EODHelper(api_token=api_token, base_path=base_path)
         self.n_val_periods = n_val_periods        
@@ -110,8 +110,8 @@ class StockFeatureAnalyzer(object):
                                         # the fact that it is not immediately available for trading. 
         self.filter_min_obs = 10        # Excludes dates/metrics with few observations
         self.filter_min_price = 1       # Excludes stocks with too low of a price
-        self.filter_min_monthly_volume = 21 * 5000  # Exclude stocks with low trading volume
-        self.filter_max_return = 100  # Excludes return outliers from sample
+        self.filter_min_monthly_volume = 21 * 50000  # Exclude stocks with low trading volume
+        self.filter_max_return = 10     # Excludes return outliers from sample
 
         # Set default filters
         self.set_default_filters()
@@ -228,19 +228,24 @@ class StockFeatureAnalyzer(object):
             if monthly_ts.shape[0] > 2:
                 idx_shared = monthly_ts.index.isin(self.dates['m'])
                 self._time_series[mc_name].loc[monthly_ts.index[idx_shared], symbol] = \
-                    monthly_ts.values[idx_shared].astype(np.float32)
+                    monthly_ts.values[idx_shared].flatten().astype(np.float32)
 
     def set_default_filters(self):
         self._good_mask = None
         self._filters = [
             IsNotNAFilter(self, TSNames.CLOSE.value),
             IsNotNAFilter(self, TSNames.ADJUSTED_CLOSE.value),
+            IsNotNAFilter(self, TSNames.ADJUSTED_CLOSE.value,
+                          property_func=lambda x: x.rolling(12).mean()),
+            InRangeFilter(self, TSNames.DAILY_PRICES.value, high=3, high_inc=True,
+                          property_func=lambda x: np.isnan(x).rolling(63).sum().resample('M').last()),
             IsNotNAFilter(self, TSNames.VOLUME.value),
             InRangeFilter(self, TSNames.CLOSE.value,
                           low=self.filter_min_price),
             InRangeFilter(self, TSNames.ADJUSTED_CLOSE.value,
                           low=self.filter_min_price),
             InRangeFilter(self, TSNames.VOLUME.value,
+                          property_func=lambda x: x.rolling(12).quantile(0.01, interpolation='lower'),
                           low=self.filter_min_monthly_volume),
             EntireColumnInRangeFilter(self, TSNames.MONTHLY_RETURNS.value,
                                       high=self.filter_max_return)
@@ -752,7 +757,7 @@ class StockFeatureAnalyzer(object):
         signal_names = []
         for j in range(3):
             x = self.daily_prices.ewm(halflife=HL(S[j])).mean() - self.daily_prices.ewm(halflife=HL(L[j])).mean()
-            y = x / self.daily_prices.rolling(63, min_periods=57).std()
+            y = x / self.daily_prices.rolling(63, min_periods=60).std()
             z = y / y.rolling(252, min_periods=240).std()
             u = x * np.exp(-np.power(x, 2) / 4) / 0.89    
             self._cta_momentum_signals['x' + str(j)] = x.resample('M').last().values
