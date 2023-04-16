@@ -7,13 +7,15 @@ from abc import ABC, abstractmethod
 
 
 class AbstractFilter(ABC):
-    def __init__(self, instance, property_name, *args, **kwargs):
+    def __init__(self, instance, property_name, property_func=None, *args, **kwargs):
         self.instance = instance
         self.property_name = property_name
+        self.property_func = property_func if property_func is not None else lambda x: x
 
     @property
     def property_values(self):
-        return getattr(self.instance, self.property_name)
+        values = getattr(self.instance, self.property_name)
+        return self.property_func(values)
 
     @abstractmethod
     def get_mask(self, *args, **kwargs):
@@ -21,8 +23,8 @@ class AbstractFilter(ABC):
 
 
 class EqualFilter(AbstractFilter):
-    def __init__(self, instance, property_name, target_value):
-        super(EqualFilter, self).__init__(instance, property_name)
+    def __init__(self, instance, property_name, target_value, property_func=None):
+        super(EqualFilter, self).__init__(instance, property_name, property_func=property_func)
         self.target_value = target_value
 
     def get_mask(self):
@@ -30,9 +32,10 @@ class EqualFilter(AbstractFilter):
 
 
 class InRangeFilter(AbstractFilter):
-    def __init__(self, instance, property_name, low: float = -np.inf, high: float = np.inf,
+    def __init__(self, instance, property_name, property_func=None,
+                 low: float = -np.inf, high: float = np.inf,
                  low_inc: bool = True, high_inc: bool = True):
-        super(InRangeFilter, self).__init__(instance, property_name)
+        super(InRangeFilter, self).__init__(instance, property_name, property_func=property_func)
         self.low = low
         self.high = high
         self.low_inc = low_inc
@@ -56,10 +59,11 @@ class InRangeFilter(AbstractFilter):
 
 
 class EntireColumnInRangeFilter(InRangeFilter):
-    def __init__(self, instance, property_name, low: float = -np.inf, high: float = np.inf,
+    def __init__(self, instance, property_name, property_func=None,
+                 low: float = -np.inf, high: float = np.inf,
                  low_inc: bool = True, high_inc: bool = True, ignore_na: bool = True):
         super(EntireColumnInRangeFilter, self).__init__(instance, property_name,
-            low=low, high=high, low_inc=low_inc, high_inc=high_inc)
+            low=low, high=high, low_inc=low_inc, high_inc=high_inc, property_func=property_func)
         self.ignore_na = ignore_na
 
     def get_mask(self):
@@ -74,10 +78,11 @@ class EntireColumnInRangeFilter(InRangeFilter):
 
 
 class EntireRowInRangeFilter(InRangeFilter):
-    def __init__(self, instance, property_name, low: float = -np.inf, high: float = np.inf,
-                 low_inc: bool = True, high_inc: bool = True, ignore_na: bool = True):
+    def __init__(self, instance, property_name, property_func=None,
+            low: float = -np.inf, high: float = np.inf, low_inc: bool = True,
+            high_inc: bool = True, ignore_na: bool = True):
         super(EntireRowInRangeFilter, self).__init__(instance, property_name,
-            low=low, high=high, low_inc=low_inc, high_inc=high_inc)
+            low=low, high=high, low_inc=low_inc, high_inc=high_inc, property_func=property_func)
         self.ignore_na = ignore_na
 
     def get_mask(self):
