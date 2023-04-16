@@ -17,14 +17,17 @@ from eodhistdata.private_constants import API_TOKEN, BASE_PATH
 
 def main(argv):
     t0 = time.time()
-    output_file = os.path.join(BASE_PATH, 'gridsearch.json')
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", type=str, default='1999-12-31',
                         help="First date of data to download")
     parser.add_argument("--end", type=str, default='2022-12-31',
-                        help="Last date of data to download")                        
+                        help="Last date of data to download")
+    parser.add_argument("--direction", type=str, default='bull',
+                        help="Whether to run LTR for 'bull' or 'bear' forecasts.")
     args = parser.parse_args()
+
+    assert args.direction in ('bull', 'bear'), 'Argument "direction" must be "bull" or "bear".'
+    output_file = os.path.join(BASE_PATH, f'gridsearch_{args.direction}.json')
 
     eod_helper = EODHelper(
         api_token=API_TOKEN, base_path=BASE_PATH)
@@ -32,7 +35,7 @@ def main(argv):
 
     featureObj = StockFeatureAnalyzer(API_TOKEN, BASE_PATH, symbols=symbols,
                                     start=args.start, end=args.end)
-    featureObj.load_time_series()
+    featureObj.load_ohlcv_data()
 
     momentum_windows = [3, 6, 12]
 
@@ -40,9 +43,8 @@ def main(argv):
     for window in momentum_windows:
         mom_array = featureObj.get_momentum(window)
         mom_features[f'mom_{window}m'] = mom_array
-        #mom_features[f'mom_{window}m_p'] = utils.calc_feature_percentiles(mom_array)
-        
-        vol = featureObj.get_volatility(window)[f'volatility_{window}m']
+
+        vol = featureObj.get_volatility(window * 21)
         mom_array_norm = mom_array / np.clip(vol, 0.03, np.inf)
         mom_features[f'mom_{window}m_norm'] = mom_array_norm
 
@@ -53,24 +55,23 @@ def main(argv):
     ds_helper.return_window = 1
     ds_helper.filter_max_monthly_volume = np.inf
     ds_helper.exclude_nan = True
-    ds_helper.n_months_valid = 36
-    ds_helper.n_months_test = 24
+    ds_helper.n_months_valid = 60
 
     params_grid = dict(
-        learning_rate=[1e-4, 1e-3, 1e-2, 1e-1, 1],
-        max_depth = [2, 4, 6, 8, 10],
-        n_estimators =  [20, 40, 80, 160, 320],
-        feature_fraction = [0.6, 0.8, 1.0],
+        learning_rate=[0.01, 0.1, 1.0],
+        max_depth = [2, 4, 6],
+        n_estimators =  [80, 160, 240],
+        feature_fraction = [0.7, 0.85, 1.0],
         label_gain=[[(2 ** w) - 1.0 for w in range(featureObj.n_buckets)]],
-        boosting = ['gbdt', 'dart'],  # 'gbdt' is default    
+        boosting = ['gbdt'],  # 'gbdt' is default    
     )
 
     grid_kwargs = utils.get_cv_grid_args(params_grid)
 
     for j, gkwargs in enumerate(grid_kwargs):
         print(f'Iteration {j}')
-        scores, _ = utils.cross_validate_gbm(
-            lgb.LGBMRanker, ds_helper, n_folds=5, **gkwargs)
+        scores, rtns, _ = utils.cross_validate_gbm(
+            lgb.LGBMRanker, ds_helper, n_folds=5, direction=args.direction, **gkwargs)
 
         # Read existing params, add result, and re-write to file
         if os.path.isfile(output_file):
@@ -78,12 +79,12 @@ def main(argv):
                 results = json.load(f)
         else:
             results = []
-        results.append((j, scores, gkwargs))
+        results.append(dict(iteration=j, score=scores, returns=rtns, args=gkwargs))
         with open(output_file, "w") as f:
             f.write(json.dumps(results))
 
     print('======================================================')                
-    print(f'Download Complete. Elapsed time = {time.time() - t0}')
+    print(f'Calculation complete. Elapsed time = {time.time() - t0}')
 
 
 if __name__ == "__main__":
