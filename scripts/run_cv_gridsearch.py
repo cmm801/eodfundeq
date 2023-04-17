@@ -51,9 +51,7 @@ def main(argv):
     cta_mom_features = featureObj.get_cta_momentum_signals()
 
     mf = mom_features | cta_mom_features
-    ds_helper = DatasetHelper(featureObj, mf)
-    ds_helper.return_window = 1
-    ds_helper.filter_max_monthly_volume = np.inf
+    ds_helper = DatasetHelper(featureObj, mf, return_window=1, norm=True)
     ds_helper.exclude_nan = True
     ds_helper.n_months_valid = 60
 
