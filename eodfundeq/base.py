@@ -110,7 +110,7 @@ class StockFeatureAnalyzer(object):
                                         # the fact that it is not immediately available for trading. 
         self.filter_min_obs = 10        # Excludes dates/metrics with few observations
         self.filter_min_price = 1       # Excludes stocks with too low of a price
-        self.filter_min_monthly_volume = 21 * 50000  # Exclude stocks with low trading volume
+        self.filter_min_monthly_volume = 21 * 10000  # Exclude stocks with low trading volume
         self.filter_max_return = 10     # Excludes return outliers from sample
 
         # Set default filters
