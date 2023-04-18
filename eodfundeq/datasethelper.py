@@ -16,15 +16,16 @@ BEAR = 'bear'
 
 
 class DatasetHelper():
-    def __init__(self, featureObj, features_dict, return_window=3):
+    def __init__(self, featureObj, features_dict, return_window=1, norm=True):
         self.featureObj = featureObj
         self.features_dict = features_dict
         self.return_window = return_window
         self._filter_max_monthly_volume = np.inf
         self.reset_cache()
 
-        self.target_vol = 0.30
+        self.target_vol = 0.15
         self.exclude_nan = False
+        self.norm = norm
         
         # Parameters needed to split train/validation/test sets
         self.data_start = pd.Timestamp('1999-12-31')
@@ -71,7 +72,7 @@ class DatasetHelper():
     @property
     def datasets(self):
         if self._datasets is None:
-            self._datasets = dict(X=dict(), year_month=dict(), symbol=dict(),
+            self._datasets = dict(X=dict(), year_month=dict(), symbol=dict(), symbol_idx=dict(),
                                   y_class=dict(), y_reg=dict(), y_pct=dict(),
                                   y_class_norm=dict(), y_reg_norm=dict(), y_pct_norm=dict(),
                                  )
@@ -89,7 +90,8 @@ class DatasetHelper():
             dates = self.featureObj.dates['m']
             ym_int = np.array([x.year * 100 + x.month for x in dates])
             ym_panel = np.tile(ym_int.reshape(-1, 1), n_symbols)
-            symbol_panel = np.tile(np.arange(n_symbols).reshape(-1, 1), len(dates)).T
+            symbol_index_panel = np.tile(np.arange(n_symbols).reshape(-1, 1), len(dates)).T
+            symbol_panel = np.tile(self.featureObj.symbols.reshape(-1, 1), len(dates)).T
 
             for dataset_type, mask in dataset_masks.items():
                 fut_rtns = future_returns.copy()
@@ -99,7 +101,7 @@ class DatasetHelper():
                 pred_bkt = np.digitize(pred_pct, np.linspace(0, 1, self.featureObj.n_buckets+1)[:-1])
                 y_0 = pred_bkt[mask] - 1
 
-                fut_rtns_norm = fut_rtns / np.clip(volatility, 0.03, np.inf)
+                fut_rtns_norm = fut_rtns / np.maximum(volatility, 0.03)
                 bucketed_returns_norm = self.featureObj.get_buckets(fut_rtns_norm)
                 pred_pct_norm = utils.calc_feature_percentiles(bucketed_returns_norm)
                 pred_bkt_norm = np.digitize(pred_pct_norm, np.linspace(0, 1, self.featureObj.n_buckets+1)[:-1])
@@ -118,6 +120,7 @@ class DatasetHelper():
                 self._datasets['y_pct_norm'][dataset_type] = pred_pct_norm[mask][idx_no_nan]
                 self._datasets['year_month'][dataset_type] = ym_panel[mask][idx_no_nan]
                 self._datasets['symbol'][dataset_type] = symbol_panel[mask][idx_no_nan]
+                self._datasets['symbol_idx'][dataset_type] = symbol_index_panel[mask][idx_no_nan]
                 assert ~np.any(np.isnan(fut_rtns[mask][idx_no_nan]))
         return self._datasets
 
@@ -196,68 +199,114 @@ class DatasetHelper():
             groups[dataset_type] = df_ym.groupby('year_month').count().sort_index().to_numpy()
         return groups
     
-    def get_eval_set(self):
+    def get_eval_set(self, norm=True):
         eval_set = dict(bull=[], bear=[], reg=[], pct=[])
         year_month_vals = self.year_month['validation']
         for ym in sorted(set(year_month_vals)):
             idx_ym = (ym == year_month_vals)
-            eval_set[BULL].append((self.X['validation'][idx_ym,:], self.y_class_norm['validation'][idx_ym]))
-            eval_set[BEAR].append((self.X['validation'][idx_ym,:], 
-                                   self.featureObj.n_buckets - 1 - self.y_class_norm['validation'][idx_ym]))
+            if self.norm:
+                y_vals = self.y_class_norm['validation'][idx_ym]
+            else:
+                y_vals = self.y_class['validation'][idx_ym]
+
+            eval_set[BULL].append((self.X['validation'][idx_ym,:], y_vals))
+            eval_set[BEAR].append((self.X['validation'][idx_ym,:], self.featureObj.n_buckets - 1 - y_vals))
             eval_set['reg'].append(self.y_reg['validation'][idx_ym])
-            eval_set['pct'].append(self.y_pct['validation'][idx_ym])
         return eval_set
 
-    def get_performance(self, model, n_stocks=100, dataset='validation', weighting='equal'):
+    def get_selected_returns(self, model, dataset, n_stocks=100):
         year_month_vals = self.year_month[dataset]
-        
         prices_ts = self.featureObj.daily_prices
-        model_period_rtns = []
+        true_rtns_list = []
+        selected_symbols_list = []
+        period_ends = []
         sorted_year_months = sorted(set(year_month_vals))
         for ym in sorted_year_months:
             idx_ym = (ym == year_month_vals)
             y_score = model.predict(self.X[dataset][idx_ym,:])
-            idx_score = np.argsort(y_score)[-n_stocks:]
-            idx_symbol = self.featureObj.symbols[self.symbol[dataset][idx_ym][idx_score]]
-            
+            idx_score = np.argsort(y_score)[-n_stocks:][::-1]
+            selected_symbols = self.symbol[dataset][idx_ym][idx_score]
             period_end = pd.Timestamp(datetime.datetime.strptime(str(ym), '%Y%m')) + pd.tseries.offsets.MonthEnd(0)
+            period_ends.append(period_end)
             period_start = period_end - pd.Timedelta(91, unit='d')
             idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
-            period_prices = prices_ts.loc[idx_period, idx_symbol]
+            period_prices = prices_ts.loc[idx_period, selected_symbols]
             rtns = np.log(np.maximum(period_prices, self.featureObj.price_tol) / \
                         np.maximum(period_prices.shift(1), self.featureObj.price_tol))
             rtns = rtns.iloc[1:,:]
             assert np.isnan(rtns.values).sum(axis=0).max() < 10
-            rtns.fillna(0, inplace=True)
-            
-            if weighting == 'equal':
-                weights = np.ones((idx_score.size,)) / idx_score.size
-            elif weighting == 'hrp':        
-                hrp = HRPOpt(rtns)
-                hrp.optimize()
-                weights = pd.Series(hrp.clean_weights())
-            elif weighting == 'minvar':
-                weights, _ = optim.optimize_min_variance(np.cov(rtns.T), ub=0.05)
-            else:
-                raise ValueError(f'Unsupported weighting scheme: {weighting}')
-
-            assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'
-            weights /= weights.sum()
             true_rtns = self.y_reg[dataset][idx_ym]
-            model_period_rtns.append((weights * true_rtns[idx_score]).sum())
-        return np.array(model_period_rtns)
+            true_rtns_list.append(true_rtns[idx_score])
+            selected_symbols_list.append(selected_symbols)
+
+        df_rtns = pd.DataFrame(true_rtns_list, index=pd.DatetimeIndex(period_ends))
+        df_symbols = pd.DataFrame(selected_symbols_list, index=pd.DatetimeIndex(period_ends))
+        return df_rtns, df_symbols
+
+    def get_strategy_weights(self, model, dataset, n_stocks=100, weighting='equal'):
+        _, df_symbols = self.get_selected_returns(model, dataset, n_stocks=n_stocks)
+        prices_ts = self.featureObj.daily_prices    
+        weights_list = []
+        for period_end in df_symbols.index:
+            if weighting == 'equal':
+                weights = np.ones((n_stocks,)) / n_stocks
+            else:
+                period_symbols = df_symbols.loc[period_end].values
+                period_start = period_end - pd.Timedelta(91, unit='d')
+                idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
+                period_prices = prices_ts.loc[idx_period, period_symbols]
+                rtns = np.log(np.maximum(period_prices, self.featureObj.price_tol) / \
+                            np.maximum(period_prices.shift(1), self.featureObj.price_tol))
+                rtns = rtns.iloc[1:,:]
+                assert np.isnan(rtns.values).sum(axis=0).max() < 10
+                rtns.fillna(0, inplace=True)
+                if weighting == 'hrp':        
+                    hrp = HRPOpt(rtns)
+                    hrp.optimize()
+                    weights = pd.Series(hrp.clean_weights())
+                    assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'
+                elif weighting == 'minvar':
+                    weights, _ = optim.optimize_min_variance(np.cov(rtns.T), ub=0.05)
+                    assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'                
+                elif weighting == 'vol':
+                    realized_vol = rtns.std(axis=0).values * np.sqrt(252)
+                    weights = 1/n_stocks * np.minimum(self.target_vol / realized_vol, 1.2)
+                elif weighting == 'erc':
+                    asset_cov = rtns.cov() * 252
+                    lb = 1/n_stocks * 0.5
+                    ub = 1/n_stocks * 2.0
+                    weights = optim.optimize_erc(asset_cov, vol_lb=self.target_vol, vol_ub=self.target_vol,
+                        lb=lb, ub=ub, unit_constraint=True)
+                else:
+                    raise ValueError(f'Unsupported weighting scheme: {weighting}')
+
+            weights_list.append(weights)
+        return pd.DataFrame(np.vstack(weights_list), index=df_symbols.index)
+
+    def get_performance(self, model, n_stocks=100, dataset='validation', weighting='equal'):
+        df_rtns, _ = self.get_selected_returns(model, dataset, n_stocks=n_stocks)
+        df_wts = self.get_strategy_weights(model, dataset, n_stocks=n_stocks, weighting=weighting)
+        realized_rtns = []
+        for period_end in df_rtns.index:
+            weights = df_wts.loc[period_end].values
+            true_rtns = df_rtns.loc[period_end].values
+            realized_rtns.append((weights * true_rtns).sum())
+        return pd.Series(realized_rtns, index=df_rtns.index)
 
     def get_ndcg(self, model, n_stocks=100, dataset='validation'):
-        year_month_vals = self.year_month[dataset]    
+        year_month_vals = self.year_month[dataset]
         prices_ts = self.featureObj.daily_prices
         model_period_ndcg = []    
         sorted_year_months = sorted(set(year_month_vals))
         for ym in sorted_year_months:
             idx_ym = (ym == year_month_vals)
             y_score = model.predict(self.X[dataset][idx_ym,:])
-            true_bkt_norm = self.y_class_norm[dataset][idx_ym]        
-            ndcg_val = utils.calc_ndcg(true_bkt_norm, y_score, k=n_stocks, form='exp')
+            if self.norm:
+                true_bkt = self.y_class_norm[dataset][idx_ym]
+            else:
+                true_bkt = self.y_class[dataset][idx_ym]
+
+            ndcg_val = utils.calc_ndcg(true_bkt, y_score, k=n_stocks, form='exp')
             assert ndcg_val > 0
             model_period_ndcg.append(ndcg_val)
-            
         return np.array(model_period_ndcg)
