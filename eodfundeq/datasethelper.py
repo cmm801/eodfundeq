@@ -2,6 +2,7 @@ import datetime
 import numpy as np
 import pandas as pd
 
+from abc import abstractmethod, ABC
 from statsmodels.stats.correlation_tools import cov_nearest 
 from pypfopt import HRPOpt
 
@@ -12,16 +13,16 @@ from eodfundeq import filters
 from eodfundeq import utils
 
 
-class DatasetHelper():
-    def __init__(self, feature_store, features_dict, return_window=1, norm_returns=True,
+class DatasetHelper(object):
+    def __init__(self, feature_store, return_window=1, norm_returns=True,
                  exclude_nan_features=False, n_buckets=5):
         self.feature_store = feature_store
-        self.features_dict = features_dict
         self.return_window = return_window
         self.norm_returns = norm_returns
         self.exclude_nan_features = exclude_nan_features
         self.n_buckets = n_buckets
 
+        self._features = dict()
         self._filter_max_monthly_volume = np.inf
         self.reset_cache()
 
@@ -33,7 +34,7 @@ class DatasetHelper():
         self.train_start = pd.Timestamp('2003-12-31')
         self.num_insulation_periods = 12
         self.n_months_valid = 36
-        self.n_months_test = 18        
+        self.n_months_test = 18
         
     def get_intervals(self):
         intervals = dict()
@@ -45,16 +46,20 @@ class DatasetHelper():
         train_end = valid_start - pd.tseries.offsets.MonthEnd(self.num_insulation_periods)
         intervals[DataSetTypes.TRAIN.value] = (self.train_start, train_end)
         return intervals
-        
+
     @property
-    def features_dict(self):
-        return self._features_dict
+    def features(self):
+        return self.get_features()
     
-    @features_dict.setter
-    def features_dict(self, fd):
-        self._features_dict = fd
+    @features.setter
+    def features(self, fd):
+        self._features = fd
         self.reset_cache()
-    
+
+    @property
+    def feature_names(self):
+        return sorted(self.features.keys())
+
     @property
     def filter_max_monthly_volume(self):
         return self._filter_max_monthly_volume
@@ -64,10 +69,6 @@ class DatasetHelper():
         if self._filter_max_monthly_volume != mv:
             self._filter_max_monthly_volume = mv
             self._datasets = None
-
-    @property
-    def feature_names(self):
-        return sorted(self.features_dict.keys())
 
     @property
     def datasets(self):
@@ -183,7 +184,7 @@ class DatasetHelper():
         dataset_masks = self.get_dataset_masks()
         dataset_features_lists = {k: [] for k in dataset_masks.keys()}
         for feature_name in self.feature_names:
-            feature_arr = self.features_dict[feature_name]
+            feature_arr = self.features[feature_name]
             for dataset_type, mask in dataset_masks.items():
                 dataset_features_lists[dataset_type].append(feature_arr[mask])
         return dataset_features_lists
