@@ -757,8 +757,8 @@ class StockFeatureAnalyzer(object):
         signal_names = []
         for j in range(3):
             x = self.daily_prices.ewm(halflife=HL(S[j])).mean() - self.daily_prices.ewm(halflife=HL(L[j])).mean()
-            y = x / self.daily_prices.rolling(63, min_periods=60).std()
-            z = y / y.rolling(252, min_periods=240).std()
+            y = x / np.maximum(self.daily_prices.rolling(63, min_periods=60).std(), self.price_tol)
+            z = y / np.maximum(y.rolling(252, min_periods=240).std(), self.price_tol)
             u = x * np.exp(-np.power(x, 2) / 4) / 0.89    
             self._cta_momentum_signals['x' + str(j)] = x.resample('M').last().values
             self._cta_momentum_signals['y' + str(j)] = y.resample('M').last().values
