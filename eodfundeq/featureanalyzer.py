@@ -1,22 +1,21 @@
 import numpy as np
 import pandas as pd
 
+from typing import Optional
+
 import pyfintools.tools.freq
 
 
-class AnalyzeFeatures(object):
-    def __init__(self, featureObj, clip=None):
-        self.featureObj = featureObj
+class FeatureAnalyzer(object):
+    def __init__(self, feature_store, n_buckets=5, clip=None):
+        self.feature_store = feature_store
         self.clip = clip if clip is not None else (-np.inf, np.inf)
-
-    @property
-    def n_buckets(self):
-        return self.featureObj.n_buckets
+        self.n_buckets = n_buckets             # How many buckets to use for metric sort
 
     def bucket_results(self, metric_vals, return_window, clip=None, frequency='m'):
         if clip is None:
             clip = self.clip
-        return_vals = np.clip(self.featureObj.get_future_returns(return_window), *clip)
+        return_vals = np.clip(self.feature_store.get_future_returns(return_window), *clip)
         assert metric_vals.shape == return_vals.shape, 'Shape of metric values must align with returns'
 
         bucketed_rtns = []
@@ -24,13 +23,13 @@ class AnalyzeFeatures(object):
         high_vals = []
         low_vals = []
 
-        all_years = sorted(set([x.year for x in self.featureObj.dates[frequency]]))
+        all_years = sorted(set([x.year for x in self.feature_store.dates[frequency]]))
         annual_high_vals = {y: [] for y in all_years}
         annual_low_vals = {y: [] for y in all_years}
-        for idx_date, date in enumerate(self.featureObj.dates[frequency]):
+        for idx_date, date in enumerate(self.feature_store.dates[frequency]):
             idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
                        ~np.isnan(return_vals[idx_date,:]) & \
-                       self.featureObj.good_mask[idx_date,:]
+                       self.feature_store.good_mask[idx_date,:]
 
             metric_row = metric_vals[idx_date, idx_keep]
             return_row = return_vals[idx_date, idx_keep]
@@ -83,25 +82,12 @@ class AnalyzeFeatures(object):
 
         return np.vstack(bucketed_rtns), np.vstack(bucketed_nobs), ann_tstat_ts, overall_tstat
 
-    def get_buckets(self, metric_vals, frequency='m'):
-        buckets = np.nan * np.ones_like(metric_vals, dtype=np.int32)
-        for idx_date, date in enumerate(self.featureObj.dates[frequency]):
-            idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
-                       self.featureObj.good_mask[idx_date,:]
-            metric_row = metric_vals[idx_date, idx_keep]
-            if not metric_row.size:
-                continue
-            bins = np.quantile(metric_row, np.linspace(0, 1, self.n_buckets+1))
-            bins[-1] += .01  # Hack to avoid max value being assigned to its own bucket
-            buckets[idx_date, idx_keep] = np.digitize(metric_row, bins, right=False)
-        return buckets
-
     def get_performance_ts(self, metric_vals, return_window, clip=None, frequency='m'):
         period_rtns, num_obs, ann_tstat_ts, overall_tstat = self.bucket_results(
             metric_vals, return_window=return_window, clip=clip)
-        idx_keep_rows = np.min(num_obs, axis=1) >= self.featureObj.filter_min_obs
+        idx_keep_rows = np.min(num_obs, axis=1) >= self.feature_store.filter_min_obs
         period_rtns = period_rtns[idx_keep_rows, :]
-        good_dates = self.featureObj.dates[frequency][idx_keep_rows]
+        good_dates = self.feature_store.dates[frequency][idx_keep_rows]
 
         if period_rtns.shape[0] == 0:
             return pd.DataFrame(), pd.DataFrame(), ann_tstat_ts, np.nan
@@ -161,7 +147,7 @@ class AnalyzeFeatures(object):
         for momentum_window in momentum_windows:
             for lag in lags:
                 if lag < momentum_window:
-                    mom_ts = self.featureObj.get_momentum(momentum_window, lag=lag)
+                    mom_ts = self.feature_store.get_momentum(momentum_window, lag=lag)
                     key = f'mom_{momentum_window}m'
                     if lag > 0:
                         key += str(lag)
@@ -171,13 +157,13 @@ class AnalyzeFeatures(object):
 
     def get_bucket_summary_for_fundamental_ratios(self, return_windows, fillna=False,
                                                   n_periods=None, min_obs=4, clip=None):
-        self.featureObj.calc_all_fundamental_ratios(fillna=fillna,
+        self.feature_store.calc_all_fundamental_ratios(fillna=fillna,
             n_periods=n_periods, min_obs=min_obs)
 
         results = dict()
         for ratio_type in FundamentalRatios:
             results[ratio_type.value] = self.get_bucketed_returns_summary(
-                self.featureObj.fundamental_ratios[ratio_type.value],
+                self.feature_store.fundamental_ratios[ratio_type.value],
                 return_windows=return_windows,
                 clip=clip)
         return results

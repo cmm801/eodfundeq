@@ -10,7 +10,6 @@ import scipy.stats
 
 from collections.abc import Iterable
 from enum import Enum
-from typing import Optional, Union
 
 import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
@@ -101,7 +100,6 @@ class FeatureStore(object):
         
         # Other parameters
         self.price_tol = 1e-4           # Used to make sure we don't divide by 0
-        self.n_buckets = 5              # How many buckets to use for metric sort
         self.fundamental_data_delay = 1 # Months to delay use of fundamental data, to account for
                                         # the fact that it is not immediately available for trading. 
         self.filter_min_obs = 10        # Excludes dates/metrics with few observations

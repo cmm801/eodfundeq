@@ -13,13 +13,14 @@ from eodfundeq import utils
 
 
 class DatasetHelper():
-    def __init__(self, featureObj, features_dict, return_window=1, norm_returns=True,
-                 exclude_nan_features=False):
-        self.featureObj = featureObj
+    def __init__(self, feature_store, features_dict, return_window=1, norm_returns=True,
+                 exclude_nan_features=False, n_buckets=5):
+        self.feature_store = feature_store
         self.features_dict = features_dict
         self.return_window = return_window
         self.norm_returns = norm_returns
         self.exclude_nan_features = exclude_nan_features
+        self.n_buckets = n_buckets
 
         self._filter_max_monthly_volume = np.inf
         self.reset_cache()
@@ -77,33 +78,33 @@ class DatasetHelper():
                                  )
             dataset_masks = self.get_dataset_masks()
             dataset_features_lists = self._get_dataset_features_lists()
-            future_returns = self.featureObj.get_future_returns(self.return_window)
+            future_returns = self.feature_store.get_future_returns(self.return_window)
             if self.return_window == 1:
-                volatility = self.featureObj.get_volatility(63, min_obs=60)
+                volatility = self.feature_store.get_volatility(63, min_obs=60)
             elif self.return_window == 3:
-                volatility = self.featureObj.get_volatility(126, min_obs=120)
+                volatility = self.feature_store.get_volatility(126, min_obs=120)
             else:
                 raise NotImplementedError('The volatility window corresponding to this return window has not been chosen.')
 
-            n_symbols = len(self.featureObj.symbols)
-            dates = self.featureObj.dates['m']
+            n_symbols = len(self.feature_store.symbols)
+            dates = self.feature_store.dates['m']
             ym_int = np.array([x.year * 100 + x.month for x in dates])
             ym_panel = np.tile(ym_int.reshape(-1, 1), n_symbols)
             symbol_index_panel = np.tile(np.arange(n_symbols).reshape(-1, 1), len(dates)).T
-            symbol_panel = np.tile(self.featureObj.symbols.reshape(-1, 1), len(dates)).T
+            symbol_panel = np.tile(self.feature_store.symbols.reshape(-1, 1), len(dates)).T
 
             for dataset_type, mask in dataset_masks.items():
                 fut_rtns = future_returns.copy()
                 fut_rtns[~mask] = np.nan
-                bucketed_returns = self.featureObj.get_buckets(fut_rtns)
+                bucketed_returns = self.bucketize_feature_values(fut_rtns)
                 pred_pct = utils.calc_feature_percentiles(bucketed_returns)
-                pred_bkt = np.digitize(pred_pct, np.linspace(0, 1, self.featureObj.n_buckets+1)[:-1])
+                pred_bkt = np.digitize(pred_pct, np.linspace(0, 1, self.n_buckets+1)[:-1])
                 y_0 = pred_bkt[mask] - 1
 
                 fut_rtns_norm = fut_rtns / np.maximum(volatility, 0.03)
-                bucketed_returns_norm = self.featureObj.get_buckets(fut_rtns_norm)
+                bucketed_returns_norm = self.bucketize_feature_values(fut_rtns_norm)
                 pred_pct_norm = utils.calc_feature_percentiles(bucketed_returns_norm)
-                pred_bkt_norm = np.digitize(pred_pct_norm, np.linspace(0, 1, self.featureObj.n_buckets+1)[:-1])
+                pred_bkt_norm = np.digitize(pred_pct_norm, np.linspace(0, 1, self.n_buckets+1)[:-1])
                 y_0_norm = pred_bkt_norm[mask] - 1                
 
                 X_raw = np.vstack(dataset_features_lists[dataset_type]).T
@@ -164,16 +165,16 @@ class DatasetHelper():
 
     def get_dataset_masks(self):
         vol_filter = filters.InRangeFilter(
-            self.featureObj, 'volume', high=self._filter_max_monthly_volume,
-            low=self.featureObj.filter_min_monthly_volume)
+            self.feature_store, 'volume', high=self._filter_max_monthly_volume,
+            low=self.feature_store.filter_min_monthly_volume)
 
         dataset_masks = dict()
         intervals = self.get_intervals()
         for dataset_type, interval in intervals.items():
-            dataset_mask = self.featureObj._init_data_panel(bool)
-            dataset_mask[(self.featureObj.dates['m'] < interval[0])] = False
-            dataset_mask[(self.featureObj.dates['m'] > interval[1])] = False
-            dataset_masks[dataset_type] = self.featureObj.good_mask & \
+            dataset_mask = self.feature_store._init_data_panel(bool)
+            dataset_mask[(self.feature_store.dates['m'] < interval[0])] = False
+            dataset_mask[(self.feature_store.dates['m'] > interval[1])] = False
+            dataset_masks[dataset_type] = self.feature_store.good_mask & \
                                                dataset_mask & \
                                                vol_filter.get_mask()
         return dataset_masks
@@ -210,13 +211,13 @@ class DatasetHelper():
 
             eval_set[ModelTypes.BULL.value].append((self.X['validation'][idx_ym,:], y_vals))
             eval_set[ModelTypes.BEAR.value].append((self.X['validation'][idx_ym,:], \
-                self.featureObj.n_buckets - 1 - y_vals))
+                self.n_buckets - 1 - y_vals))
             eval_set['reg'].append(self.y_reg['validation'][idx_ym])
         return eval_set
 
     def get_selected_returns(self, model, dataset, n_stocks=100):
         year_month_vals = self.year_month[dataset]
-        prices_ts = self.featureObj.daily_prices
+        prices_ts = self.feature_store.daily_prices
         true_rtns_list = []
         selected_symbols_list = []
         period_ends = []
@@ -231,8 +232,8 @@ class DatasetHelper():
             period_start = period_end - pd.Timedelta(91, unit='d')
             idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
             period_prices = prices_ts.loc[idx_period, selected_symbols]
-            rtns = np.log(np.maximum(period_prices, self.featureObj.price_tol) / \
-                        np.maximum(period_prices.shift(1), self.featureObj.price_tol))
+            rtns = np.log(np.maximum(period_prices, self.feature_store.price_tol) / \
+                        np.maximum(period_prices.shift(1), self.feature_store.price_tol))
             rtns = rtns.iloc[1:,:]
             assert np.isnan(rtns.values).sum(axis=0).max() < 10
             true_rtns = self.y_reg[dataset][idx_ym]
@@ -268,13 +269,26 @@ class DatasetHelper():
             weights_list.append(weights)
         return pd.DataFrame(np.vstack(weights_list), index=df_symbols.index)
 
+    def bucketize_feature_values(self, metric_vals, frequency='m'):
+        buckets = np.nan * np.ones_like(metric_vals, dtype=np.int32)
+        for idx_date, date in enumerate(self.feature_store.dates[frequency]):
+            idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
+                       self.feature_store.good_mask[idx_date,:]
+            metric_row = metric_vals[idx_date, idx_keep]
+            if not metric_row.size:
+                continue
+            bins = np.quantile(metric_row, np.linspace(0, 1, self.n_buckets+1))
+            bins[-1] += .01  # Hack to avoid max value being assigned to its own bucket
+            buckets[idx_date, idx_keep] = np.digitize(metric_row, bins, right=False)
+        return buckets
+
     def _calculate_covariance(self, period_end, symbols, n_days=91):
-        prices_ts = self.featureObj.daily_prices
+        prices_ts = self.feature_store.daily_prices
         period_start = period_end - pd.Timedelta(n_days, unit='d')
         idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
         period_prices = prices_ts.loc[idx_period, symbols]
-        rtns = np.log(np.maximum(period_prices, self.featureObj.price_tol) / \
-                    np.maximum(period_prices.shift(1), self.featureObj.price_tol))
+        rtns = np.log(np.maximum(period_prices, self.feature_store.price_tol) / \
+                    np.maximum(period_prices.shift(1), self.feature_store.price_tol))
         rtns = rtns.iloc[1:,:]
         assert np.isnan(rtns.values).sum(axis=0).max() < 10
 
@@ -315,7 +329,7 @@ class DatasetHelper():
 
     def get_ndcg(self, model, n_stocks=100, dataset='validation'):
         year_month_vals = self.year_month[dataset]
-        prices_ts = self.featureObj.daily_prices
+        prices_ts = self.feature_store.daily_prices
         model_period_ndcg = []    
         sorted_year_months = sorted(set(year_month_vals))
         for ym in sorted_year_months:

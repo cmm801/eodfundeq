@@ -70,9 +70,9 @@ class LGBMRankerAbstract(PredictionModel):
 
 
 class LGBMRankerMomentumAbstract(ABC):
-    def __init__(self, featureObj, return_window=3, norm_returns=True,
+    def __init__(self, feature_store, return_window=3, norm_returns=True,
                  exclude_nan_features=True, lgbm_kwargs=None):
-        self.featureObj = featureObj
+        self.feature_store = feature_store
         self.return_window = return_window
         self.norm_returns = norm_returns
         self.exclude_nan_features = exclude_nan_features
@@ -85,7 +85,7 @@ class LGBMRankerMomentumAbstract(ABC):
 
     # Implement abstract method
     def get_features(self):
-        cta_mom_signals = self.featureObj.get_cta_momentum_signals()
+        cta_mom_signals = self.feature_store.get_cta_momentum_signals()
         mom_signals = self._get_momentum_features()
         features = mom_signals | cta_mom_signals
         return {k: v for k, v in features.items() if k not in self.excluded_features}
@@ -98,7 +98,7 @@ class LGBMRankerMomentumAbstract(ABC):
     def ds_helper(self):
         if self._ds_helper is None:
             features = self.get_features()
-            return DatasetHelper(self.featureObj, features,
+            return DatasetHelper(self.feature_store, features,
                 return_window=self.return_window, norm_returns=self.norm_returns,
                 exclude_nan_features=self.exclude_nan_features)
 
@@ -111,7 +111,7 @@ class LGBMRankerMomentumAbstract(ABC):
         if self.direction == ModelTypes.BULL.value:
             args = (self.ds_helper.X['train'], y_vals)
         elif  self.direction == ModelTypes.BEAR.value:
-            args = (self.ds_helper.X['train'], self.featureObj.n_buckets - 1 - y_vals)
+            args = (self.ds_helper.X['train'], self.ds_helper.n_buckets - 1 - y_vals)
         else:
             raise NotImplementedError(f'Not supported for {self.direction}')
 
@@ -127,15 +127,15 @@ class LGBMRankerMomentumAbstract(ABC):
     def _get_momentum_features(self):
         mom_features = dict()
         for window in self.momentum_windows:
-            mom_array = self.featureObj.get_momentum(window)
+            mom_array = self.feature_store.get_momentum(window)
             mom_features[f'mom_{window}m'] = mom_array
 
-            vol = self.featureObj.get_volatility(window * 21, min_obs=window * 19)
+            vol = self.feature_store.get_volatility(window * 21, min_obs=window * 19)
             mom_array_norm = mom_array / np.clip(vol, 0.03, np.inf)
             mom_features[f'mom_{window}m_norm'] = mom_array_norm
 
             if window > 1:
-                mom_array_lag = self.featureObj.get_momentum(window, lag=1)
+                mom_array_lag = self.feature_store.get_momentum(window, lag=1)
                 mom_features[f'mom_{window}m1_norm'] = mom_array_lag / np.clip(vol, 0.03, np.inf)
         return mom_features
 
