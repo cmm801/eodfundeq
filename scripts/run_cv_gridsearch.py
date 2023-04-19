@@ -24,6 +24,8 @@ def main(argv):
                         help="Last date of data to download")
     parser.add_argument("--direction", type=str, default='bull',
                         help="Whether to run LTR for 'bull' or 'bear' forecasts.")
+    parser.add_argument("--return_window", type=int, default=1,
+                        help="How many months into the future we want to forecast.")
     args = parser.parse_args()
 
     assert args.direction in ('bull', 'bear'), 'Argument "direction" must be "bull" or "bear".'
@@ -44,14 +46,14 @@ def main(argv):
         mom_array = featureObj.get_momentum(window)
         mom_features[f'mom_{window}m'] = mom_array
 
-        vol = featureObj.get_volatility(window * 21)
+        vol = featureObj.get_volatility(window * 21, min_obs=window * 19)
         mom_array_norm = mom_array / np.clip(vol, 0.03, np.inf)
         mom_features[f'mom_{window}m_norm'] = mom_array_norm
 
     cta_mom_features = featureObj.get_cta_momentum_signals()
 
     mf = mom_features | cta_mom_features
-    ds_helper = DatasetHelper(featureObj, mf, return_window=1, norm=True)
+    ds_helper = DatasetHelper(featureObj, mf, return_window=args.return_window, norm=True)
     ds_helper.exclude_nan = True
     ds_helper.n_months_valid = 60
 
