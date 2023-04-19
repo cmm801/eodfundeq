@@ -44,17 +44,13 @@ TIME_SERIES_PANEL_INFO = {
     TSNames.VOLUME.value: dict(dtype=np.float32, frequency='m'),
 }
 
-class StockFeatureAnalyzer(object):
-    periods_per_year = 12
-
+class FeatureStore(object):
     def __init__(self, api_token, base_path, start, end='', symbols=None, 
-                 n_val_periods=24, n_test_periods=24, stale_days=240, clip=None, 
-                 drop_empty_ts=True):
+                 n_val_periods=24, n_test_periods=24, stale_days=240, drop_empty_ts=True):
         self.eod_helper = EODHelper(api_token=api_token, base_path=base_path)
         self.n_val_periods = n_val_periods        
         self.n_test_periods = n_test_periods
         self.stale_days = stale_days
-        self.clip = clip if clip is not None else (-np.inf, np.inf)
         self.drop_empty_ts = drop_empty_ts
 
         self.start = pd.Timestamp(start)
@@ -115,6 +111,10 @@ class StockFeatureAnalyzer(object):
 
         # Set default filters
         self.set_default_filters()
+
+    @property
+    def fundamental_ratios(self):
+        return self._fundamental_ratios
 
     def _init_data_rows(self, n_rows, dtype=np.float32):
         return np.ones((n_rows, self.symbols.size), dtype=dtype)
@@ -345,6 +345,35 @@ class StockFeatureAnalyzer(object):
         else:
             raise ValueError('Unexpected dates found in rolling vol.')
 
+    def get_cta_momentum_signals(self):
+        """Calculate the intermediate CTA Momentum signals following Baz et al for all symbols.
+
+        This function calculates the 16 intermediate momentum signals, following
+        the paper 'Dissecting Investment Strategies in the Cross Section and Time Series'
+        by Baz et al, published in 2015.
+        https://www.cmegroup.com/education/files/dissecting-investment-strategies-in-the-cross-section-and-time-series.pdf
+        """
+        if self._cta_momentum_signals is not None:
+            return self._cta_momentum_signals
+
+        self._cta_momentum_signals = dict()
+        S = [8, 16, 32]
+        L = [24, 48, 96]
+        HL = lambda n : np.log(0.5) / np.log(1 - 1/n)
+
+        signals = []
+        signal_names = []
+        for j in range(3):
+            x = self.daily_prices.ewm(halflife=HL(S[j])).mean() - self.daily_prices.ewm(halflife=HL(L[j])).mean()
+            y = x / np.maximum(self.daily_prices.rolling(63, min_periods=60).std(), self.price_tol)
+            z = y / np.maximum(y.rolling(252, min_periods=240).std(), self.price_tol)
+            u = x * np.exp(-np.power(x, 2) / 4) / 0.89    
+            self._cta_momentum_signals['x' + str(j)] = x.resample('M').last().values
+            self._cta_momentum_signals['y' + str(j)] = y.resample('M').last().values
+            self._cta_momentum_signals['z' + str(j)] = z.resample('M').last().values
+            self._cta_momentum_signals['u' + str(j)] = u.resample('M').last().values
+        return self._cta_momentum_signals
+
     def get_financial_statement_input_data(self, frequency='m'):
         """Gather all required input data from financial statements.
         
@@ -390,161 +419,6 @@ class StockFeatureAnalyzer(object):
                 fin_data[fin_data_type][idx[idx < n_dates], idx_symbol] = ts.values[idx < n_dates]
         return fin_data
 
-    def bucket_results(self, metric_vals, return_window, clip=None, frequency='m'):
-        if clip is None:
-            clip = self.clip
-        return_vals = np.clip(self.get_future_returns(return_window), *clip)
-        assert metric_vals.shape == return_vals.shape, 'Shape of metric values must align with returns'
-
-        bucketed_rtns = []
-        bucketed_nobs = []
-        high_vals = []
-        low_vals = []
-
-        all_years = sorted(set([x.year for x in self.dates]))
-        annual_high_vals = {y: [] for y in all_years}
-        annual_low_vals = {y: [] for y in all_years}
-        for idx_date, date in enumerate(self.dates[frequency]):
-            idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
-                       ~np.isnan(return_vals[idx_date,:]) & \
-                       self.good_mask[idx_date,:]
-
-            metric_row = metric_vals[idx_date, idx_keep]
-            return_row = return_vals[idx_date, idx_keep]
-
-            if not metric_row.size:
-                bucketed_nobs.append([0 for _ in range(self.n_buckets)])
-                bucketed_rtns.append([np.nan for _ in range(self.n_buckets)])
-                continue
-
-            bins = np.quantile(metric_row, np.linspace(0, 1, self.n_buckets+1))
-            bins[-1] += .01  # Hack to avoid max value being assigned to its own bucket
-            idx_bin = np.digitize(metric_row, bins, right=False)
-
-            mean_rtns = []
-            num_obs = []
-            for bin_val in range(1, self.n_buckets+1):    
-                num_obs.append(return_row[idx_bin == bin_val].size)
-                if num_obs[-1] > 0:
-                    mean_rtns.append(return_row[idx_bin == bin_val].mean())
-                else:
-                    mean_rtns.append(np.nan)
-
-            bucketed_rtns.append(mean_rtns)
-            bucketed_nobs.append(num_obs)
-            period_low_vals = return_row[idx_bin == 1].reshape(-1)
-            period_high_vals = return_row[idx_bin == self.n_buckets].reshape(-1)
-            annual_high_vals[date.year].extend(period_high_vals)
-            annual_low_vals[date.year].extend(period_low_vals)
-
-        # First flatten the annual high/low values into a single array to calculate full t-stat
-        high_vals = [x for sublist in list(annual_high_vals.values()) for x in sublist]
-        low_vals = [x for sublist in list(annual_low_vals.values()) for x in sublist]
-        high = np.hstack(high_vals) if len(high_vals) else np.array([])
-        low = np.hstack(low_vals) if len(low_vals) else np.array([])
-        if high.size & low.size:
-            overall_tstat = scipy.stats.ttest_ind(high, low).statistic
-        else:
-            overall_tstat = np.nan
-
-        # Calculate t-stat on a each of the annual sets of high/low values
-        annual_tstat_vals = []
-        for year in all_years:
-            if len(annual_low_vals[year]) > 3:
-                t = scipy.stats.ttest_ind(annual_high_vals[year], annual_low_vals[year]).statistic
-                annual_tstat_vals.append(t)
-            else:
-                annual_tstat_vals.append(np.nan)
-        ann_tstat_ts = pd.Series(annual_tstat_vals, 
-                             index=pd.DatetimeIndex([f'{y}-12-31' for y in all_years]))
-
-        return np.vstack(bucketed_rtns), np.vstack(bucketed_nobs), ann_tstat_ts, overall_tstat
-
-    def get_buckets(self, metric_vals, frequency='m'):
-        buckets = np.nan * np.ones_like(metric_vals, dtype=np.int32)
-        for idx_date, date in enumerate(self.dates[frequency]):
-            idx_keep = ~np.isnan(metric_vals[idx_date,:]) & \
-                       self.good_mask[idx_date,:]
-            metric_row = metric_vals[idx_date, idx_keep]
-            if not metric_row.size:
-                continue
-            bins = np.quantile(metric_row, np.linspace(0, 1, self.n_buckets+1))
-            bins[-1] += .01  # Hack to avoid max value being assigned to its own bucket
-            buckets[idx_date, idx_keep] = np.digitize(metric_row, bins, right=False)
-        return buckets
-
-    def get_performance_ts(self, metric_vals, return_window, clip=None):
-        period_rtns, num_obs, ann_tstat_ts, overall_tstat = self.bucket_results(
-            metric_vals, return_window=return_window, clip=clip)
-        idx_keep_rows = np.min(num_obs, axis=1) >= self.filter_min_obs
-        period_rtns = period_rtns[idx_keep_rows, :]
-        good_dates = self.dates[idx_keep_rows]
-
-        if period_rtns.shape[0] == 0:
-            return pd.DataFrame(), pd.DataFrame(), ann_tstat_ts, np.nan
-
-        # Convert to approximate monthly returns so we can compute hypothetical performance
-        monthly_rtns = -1 + (1 + period_rtns) ** (1/return_window)
-        perf_ts = pd.DataFrame(np.cumprod(1 + monthly_rtns, axis=0), index=good_dates)
-        obs_ts = pd.DataFrame(num_obs[idx_keep_rows], index=good_dates)
-        return perf_ts, obs_ts, ann_tstat_ts, overall_tstat
-
-    def get_bucketed_returns_summary(self, metric_vals, return_windows: list, 
-                                    clip: Optional[tuple] = None):
-        if return_windows is None:
-            return_windows = RETURN_WINDOWS
-
-        results = dict()
-        res_map = dict()
-        ann_returns = dict()
-        perf_ts = pd.DataFrame()  # Initialize this in case there is no data
-        for window in return_windows:
-            perf_ts, obs_ts, ann_tstat_ts, overall_tstat = self.get_performance_ts(
-                metric_vals, return_window=window, clip=clip)
-            if not perf_ts.size:
-                continue
-
-            # Get the number of periods per year so we can annualize the cum. return
-            n_years = perf_ts.shape[0] / self.periods_per_year
-            bucket_means = (-1 + perf_ts ** (1/n_years)).tail(1).values[0]
-
-            # Combine results into dict for output
-            res_map[window] = dict(
-                low=bucket_means[0],
-                high=bucket_means[-1],
-                alpha=bucket_means[-1] - bucket_means[0],
-                overall_tstat=overall_tstat,
-                tstat_25=ann_tstat_ts.quantile(0.25),
-                tstat_50=ann_tstat_ts.quantile(0.50),
-                tstat_75=ann_tstat_ts.quantile(0.75),
-                n_obs=np.sum(obs_ts.values),
-                min_obs=np.min(obs_ts.values),
-                n_dates=perf_ts.shape[0])
-            ann_returns[window] = bucket_means
-        results['summary'] = pd.DataFrame(res_map).T
-        results['ann_returns'] = pd.DataFrame(ann_returns).T
-        results['perf_ts'] = perf_ts
-        results['tstat_ts'] = ann_tstat_ts
-        return results
-
-    def get_bucket_summary_for_momentum(self, 
-                                        momentum_windows, 
-                                        return_windows,
-                                        lags=(),
-                                        clip=None):
-        lags = sorted(list(set(lags) | set([0])))
-        results = dict()
-        for momentum_window in momentum_windows:
-            for lag in lags:
-                if lag < momentum_window:
-                    mom_ts = self.get_momentum(momentum_window, lag=lag)
-                    key = f'mom_{momentum_window}m'
-                    if lag > 0:
-                        key += str(lag)
-                    results[key] = self.get_bucketed_returns_summary(
-                        mom_ts, return_windows=return_windows, clip=clip)
-        return results
-
     def calc_all_fundamental_ratios(self, fillna=False, n_periods=None, min_obs=4):
         if self._fundamental_ratios is None:
             self._fundamental_ratios = dict()
@@ -554,30 +428,9 @@ class StockFeatureAnalyzer(object):
                     ratio_type.value, fin_data, n_periods=n_periods, min_obs=min_obs, fillna=fillna)
         return self._fundamental_ratios
 
-    def get_bucket_summary_for_fundamental_ratios(self, return_windows, fillna=False,
-                                                  n_periods=None, min_obs=4, clip=None):
-        if self._fundamental_ratios is None:
-            self.calc_all_fundamental_ratios(fillna=fillna,
-                n_periods=n_periods, min_obs=min_obs)
-            self._fundamental_ratios = dict()
-            fin_data = self.get_financial_statement_input_data()            
-            for ratio_type in FundamentalRatios:
-                self._fundamental_ratios[ratio_type.value] = self.calculate_fundamental_ratio(
-                    ratio_type.value, fin_data, n_periods=n_periods, min_obs=min_obs, fillna=fillna)
-
-        results = dict()
-        for ratio_type in FundamentalRatios:
-            results[ratio_type.value] = self.get_bucketed_returns_summary(
-                self._fundamental_ratios[ratio_type.value], 
-                return_windows=return_windows,
-                clip=clip)
-        return results
-
     def calculate_fundamental_ratio(self, ratio_name, fin_data, n_periods=None,
-                                     min_obs=4, fillna=False):
-        if n_periods is None:
-            n_periods = self.periods_per_year
-
+                                     min_obs=4, fillna=False, frequency='m'):
+        n_periods = int(pyfintools.tools.freq.get_periods_per_year(frequency))
         eps = 1e-10
         if ratio_name == FundamentalRatios.ROA.value:
             net_income = utils.rolling_sum(
@@ -737,31 +590,4 @@ class StockFeatureAnalyzer(object):
         sale_or_purchase_of_stock = fin_data[FundamentalDataTypes.salePurchaseOfStock.value]
         return divs - sale_or_purchase_of_stock
 
-    def get_cta_momentum_signals(self):
-        """Calculate the intermediate CTA Momentum signals following Baz et al for all symbols.
 
-        This function calculates the 16 intermediate momentum signals, following
-        the paper 'Dissecting Investment Strategies in the Cross Section and Time Series'
-        by Baz et al, published in 2015.
-        https://www.cmegroup.com/education/files/dissecting-investment-strategies-in-the-cross-section-and-time-series.pdf
-        """
-        if self._cta_momentum_signals is not None:
-            return self._cta_momentum_signals
-
-        self._cta_momentum_signals = dict()
-        S = [8, 16, 32]
-        L = [24, 48, 96]
-        HL = lambda n : np.log(0.5) / np.log(1 - 1/n)
-
-        signals = []
-        signal_names = []
-        for j in range(3):
-            x = self.daily_prices.ewm(halflife=HL(S[j])).mean() - self.daily_prices.ewm(halflife=HL(L[j])).mean()
-            y = x / np.maximum(self.daily_prices.rolling(63, min_periods=60).std(), self.price_tol)
-            z = y / np.maximum(y.rolling(252, min_periods=240).std(), self.price_tol)
-            u = x * np.exp(-np.power(x, 2) / 4) / 0.89    
-            self._cta_momentum_signals['x' + str(j)] = x.resample('M').last().values
-            self._cta_momentum_signals['y' + str(j)] = y.resample('M').last().values
-            self._cta_momentum_signals['z' + str(j)] = z.resample('M').last().values
-            self._cta_momentum_signals['u' + str(j)] = u.resample('M').last().values
-        return self._cta_momentum_signals
