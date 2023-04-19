@@ -2,30 +2,29 @@ import datetime
 import numpy as np
 import pandas as pd
 
+from statsmodels.stats.correlation_tools import cov_nearest 
 from pypfopt import HRPOpt
 
 from pyfintools.tools import optim
 
-from eodfundeq.constants import START_DATE, DataSetTypes
+from eodfundeq.constants import START_DATE, DataSetTypes, ModelTypes
 from eodfundeq import filters
 from eodfundeq import utils
 
 
-BULL = 'bull'
-BEAR = 'bear'
-
-
 class DatasetHelper():
-    def __init__(self, featureObj, features_dict, return_window=1, norm=True):
+    def __init__(self, featureObj, features_dict, return_window=1, norm_returns=True,
+                 exclude_nan_features=False):
         self.featureObj = featureObj
         self.features_dict = features_dict
         self.return_window = return_window
+        self.norm_returns = norm_returns
+        self.exclude_nan_features = exclude_nan_features
+
         self._filter_max_monthly_volume = np.inf
         self.reset_cache()
 
         self.target_vol = 0.15
-        self.exclude_nan = False
-        self.norm = norm
         
         # Parameters needed to split train/validation/test sets
         self.data_start = pd.Timestamp('1999-12-31')
@@ -109,7 +108,7 @@ class DatasetHelper():
 
                 X_raw = np.vstack(dataset_features_lists[dataset_type]).T
                 idx_no_nan = ~np.isnan(fut_rtns[mask]) & ~np.isnan(fut_rtns_norm[mask])
-                if self.exclude_nan:
+                if self.exclude_nan_features:
                     idx_no_nan = idx_no_nan & np.all(~np.isnan(X_raw), axis=1)
                 self._datasets['X'][dataset_type] = X_raw[idx_no_nan,:]
                 self._datasets['y_class'][dataset_type] = y_0[idx_no_nan].astype(int)
@@ -199,18 +198,19 @@ class DatasetHelper():
             groups[dataset_type] = df_ym.groupby('year_month').count().sort_index().to_numpy()
         return groups
     
-    def get_eval_set(self, norm=True):
+    def get_eval_set(self):
         eval_set = dict(bull=[], bear=[], reg=[], pct=[])
         year_month_vals = self.year_month['validation']
         for ym in sorted(set(year_month_vals)):
             idx_ym = (ym == year_month_vals)
-            if self.norm:
+            if self.norm_returns:
                 y_vals = self.y_class_norm['validation'][idx_ym]
             else:
                 y_vals = self.y_class['validation'][idx_ym]
 
-            eval_set[BULL].append((self.X['validation'][idx_ym,:], y_vals))
-            eval_set[BEAR].append((self.X['validation'][idx_ym,:], self.featureObj.n_buckets - 1 - y_vals))
+            eval_set[ModelTypes.BULL.value].append((self.X['validation'][idx_ym,:], y_vals))
+            eval_set[ModelTypes.BEAR.value].append((self.X['validation'][idx_ym,:], \
+                self.featureObj.n_buckets - 1 - y_vals))
             eval_set['reg'].append(self.y_reg['validation'][idx_ym])
         return eval_set
 
@@ -245,43 +245,45 @@ class DatasetHelper():
 
     def get_strategy_weights(self, model, dataset, n_stocks=100, weighting='equal'):
         _, df_symbols = self.get_selected_returns(model, dataset, n_stocks=n_stocks)
-        prices_ts = self.featureObj.daily_prices    
         weights_list = []
         for period_end in df_symbols.index:
             if weighting == 'equal':
                 weights = np.ones((n_stocks,)) / n_stocks
             else:
                 period_symbols = df_symbols.loc[period_end].values
-                period_start = period_end - pd.Timedelta(91, unit='d')
-                idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
-                period_prices = prices_ts.loc[idx_period, period_symbols]
-                rtns = np.log(np.maximum(period_prices, self.featureObj.price_tol) / \
-                            np.maximum(period_prices.shift(1), self.featureObj.price_tol))
-                rtns = rtns.iloc[1:,:]
-                assert np.isnan(rtns.values).sum(axis=0).max() < 10
-                rtns.fillna(0, inplace=True)
-                if weighting == 'hrp':        
-                    hrp = HRPOpt(rtns)
-                    hrp.optimize()
-                    weights = pd.Series(hrp.clean_weights())
-                    assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'
-                elif weighting == 'minvar':
-                    weights, _ = optim.optimize_min_variance(np.cov(rtns.T), ub=0.05)
+                asset_cov = self._calculate_covariance(period_end, period_symbols, n_days=91)
+                if weighting == 'minvar':
+                    weights, _ = optim.optimize_min_variance(asset_cov, ub=0.05)
                     assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'                
                 elif weighting == 'vol':
-                    realized_vol = rtns.std(axis=0).values * np.sqrt(252)
+                    realized_vol = np.diag(asset_cov)
                     weights = 1/n_stocks * np.minimum(self.target_vol / realized_vol, 1.2)
                 elif weighting == 'erc':
-                    asset_cov = rtns.cov() * 252
                     lb = 1/n_stocks * 0.5
                     ub = 1/n_stocks * 2.0
                     weights = optim.optimize_erc(asset_cov, vol_lb=self.target_vol, vol_ub=self.target_vol,
                         lb=lb, ub=ub, unit_constraint=True)
                 else:
                     raise ValueError(f'Unsupported weighting scheme: {weighting}')
-
             weights_list.append(weights)
         return pd.DataFrame(np.vstack(weights_list), index=df_symbols.index)
+
+    def _calculate_covariance(self, period_end, symbols, n_days=91):
+        prices_ts = self.featureObj.daily_prices
+        period_start = period_end - pd.Timedelta(n_days, unit='d')
+        idx_period = (period_start <= prices_ts.index) & (prices_ts.index <= period_end)
+        period_prices = prices_ts.loc[idx_period, symbols]
+        rtns = np.log(np.maximum(period_prices, self.featureObj.price_tol) / \
+                    np.maximum(period_prices.shift(1), self.featureObj.price_tol))
+        rtns = rtns.iloc[1:,:]
+        assert np.isnan(rtns.values).sum(axis=0).max() < 10
+
+        # Calculate covariance with pandas, which may be non positive definite if there are NaNs
+        asset_cov_non_pos_def = rtns.cov() * 252
+        
+        # Shift to nearest positive definite covariance
+        asset_cov = cov_nearest(asset_cov_non_pos_def, threshold=1e-6)
+        return asset_cov
 
     def get_performance(self, model, n_stocks=100, dataset='validation', weighting='equal'):
         df_rtns, _ = self.get_selected_returns(model, dataset, n_stocks=n_stocks)
@@ -293,6 +295,24 @@ class DatasetHelper():
             realized_rtns.append((weights * true_rtns).sum())
         return pd.Series(realized_rtns, index=df_rtns.index)
 
+    def calc_pro_rata_performance(self, rtns):
+        window = self.return_window
+        dti = pd.DatetimeIndex(rtns.index)
+        start = rtns.index[0] - pd.tseries.offsets.MonthEnd(1)
+        strat_perf = pd.DataFrame(np.nan * np.ones((rtns.shape[0]+1, window), dtype=float), 
+                                index=dti.append(pd.DatetimeIndex([start])).sort_values())
+        strat_perf.iloc[0] = 1/window
+        for j in range(rtns.shape[0]):
+            for col in range(window):
+                if col == j % window:
+                    strat_perf.iloc[j+1, col] = strat_perf.iloc[j, col] * (1 + rtns.iloc[j])
+
+                else:
+                    strat_perf.iloc[j+1, col] = strat_perf.iloc[j, col]
+        total_perf = strat_perf.sum(axis=1)
+        total_perf.name = rtns.name
+        return total_perf
+
     def get_ndcg(self, model, n_stocks=100, dataset='validation'):
         year_month_vals = self.year_month[dataset]
         prices_ts = self.featureObj.daily_prices
@@ -301,7 +321,7 @@ class DatasetHelper():
         for ym in sorted_year_months:
             idx_ym = (ym == year_month_vals)
             y_score = model.predict(self.X[dataset][idx_ym,:])
-            if self.norm:
+            if self.norm_returns:
                 true_bkt = self.y_class_norm[dataset][idx_ym]
             else:
                 true_bkt = self.y_class[dataset][idx_ym]
