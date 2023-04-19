@@ -7,6 +7,11 @@ from eodhistdata.constants import FundamentalDataTypes
 START_DATE = '1999-12-31'
 
 
+class ModelTypes(Enum):
+    BULL = 'bull'
+    BEAR = 'bear'
+
+
 class ReturnTypes(Enum):
     """An Enum class enumerating the various available return types."""
     ARITHMETIC = 'arith'
