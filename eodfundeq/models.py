@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from abc import ABC, abstractmethod
+from typing import Optional, Union
 
 from eodfundeq import DatasetHelper
 from eodfundeq.constants import ModelTypes
@@ -13,33 +14,44 @@ import pyfintools.tools.fts
 
 
 class PredictionModel(ABC):
+    def __init__(self, feature_names: Union[str, list, None] = None):
+        if isinstance(feature_names, str):
+            self.feature_names = [feature_names]
+        else:
+            self.feature_names = feature_names
+
     @abstractmethod
     def predict(self, X):
         pass
 
+    @property
+    @abstractmethod
+    def direction(self):
+        pass
 
-class HeuristicSingleFeatureBull(PredictionModel):
-    def __init__(self, ds_helper, feature_name):
-        self.ds_helper = ds_helper
-        self.feature_name = feature_name
-        
-    def predict(self, X):
-        idx = self.ds_helper.feature_names.index(self.feature_name)
-        return X[:,idx]        
-    
 
-class HeuristicSingleFeatureBear(PredictionModel):
-    def __init__(self, ds_helper, feature_name):
-        self.ds_helper = ds_helper
-        self.feature_name = feature_name
-        
+class HeuristicSingleFeatureAbstract(PredictionModel):
     def predict(self, X):
-        idx = self.ds_helper.feature_names.index(self.feature_name)
-        return -X[:,idx]
+        assert len(self.feature_names) == 1, 'This class only allows a single feature'
+        X_vals = X.loc[:,self.feature_names].values
+        return X_vals if self.direction == ModelTypes.BULL else -X_vals
+
+
+class HeuristicSingleFeatureBull(HeuristicSingleFeatureAbstract):
+    @property
+    def direction(self):
+        return ModelTypes.BULL
+
+
+class HeuristicSingleFeatureBear(HeuristicSingleFeatureAbstract):
+    @property
+    def direction(self):
+        return ModelTypes.BEAR
 
 
 class RandomModel(PredictionModel):
-    def __init__(self, seed=1234):
+    def __init__(self, feature_names: Union[str, list, None] = None, seed=None):
+        super().__init__(feature_names)
         self._seed = seed
         self.rand_state = np.random.RandomState(self.seed)
 
@@ -57,96 +69,96 @@ class RandomModel(PredictionModel):
         N = X.shape[0]
         return self.rand_state.choice(N, N, replace=False)
 
+    @property
+    def direction(self):
+        return ModelTypes.BULL
+
 
 class LGBMRankerAbstract(PredictionModel):
-    @abstractmethod
-    def get_features(self):
-        pass
-
-    @property
-    @abstractmethod
-    def direction(self):
-        pass
-
-
-class LGBMRankerMomentumAbstract(ABC):
-    def __init__(self, feature_store, return_window=3, norm_returns=True,
-                 exclude_nan_features=True, lgbm_kwargs=None):
-        self.feature_store = feature_store
-        self.return_window = return_window
-        self.norm_returns = norm_returns
-        self.exclude_nan_features = exclude_nan_features
+    def __init__(self, feature_names: Union[str, list, None] = None, lgbm_kwargs=None):
+        super().__init__(feature_names=feature_names)
+        self.feature_names = feature_names
         self.lgbm_kwargs = dict if lgbm_kwargs is None else lgbm_kwargs
-
         self.model = lgb.LGBMRanker(**lgbm_kwargs)
-        self.momentum_windows = (3, 6, 12)
-        self.excluded_features = ('u0', 'u1', 'u2')
-        self._ds_helper = None
-
-    # Implement abstract method
-    def get_features(self):
-        cta_mom_signals = self.feature_store.get_cta_momentum_signals()
-        mom_signals = self._get_momentum_features()
-        features = mom_signals | cta_mom_signals
-        return {k: v for k, v in features.items() if k not in self.excluded_features}
+        self.n_buckets = None
 
     # Implement abstract method
     def predict(self, X):
-        return self.model.predict(X)
+        X_prc = self._preprocess_features(X)
+        return self.model.predict(X_prc)
 
-    @property
-    def ds_helper(self):
-        if self._ds_helper is None:
-            features = self.get_features()
-            return DatasetHelper(self.feature_store, features,
-                return_window=self.return_window, norm_returns=self.norm_returns,
-                exclude_nan_features=self.exclude_nan_features)
+    def fit(self, X, y, **kwargs):
+        self.n_buckets = len(set(y))
+        X_prc = self._preprocess_features(X)
+        y_prc = self._preprocess_labels(y)
+        kwargs_prc = kwargs.copy()
+        if 'eval_set' in kwargs:
+            kwargs_prc['eval_set'] = self._preprocess_eval_set(kwargs['eval_set'])
+        self.model.fit(X_prc, y_prc, **kwargs_prc)
 
-    def fit(self):
-        if self.ds_helper.norm_returns:
-            y_vals = self.ds_helper.y_class_norm['train']
-        else:
-            y_vals = self.ds_helper.y_class['train']
+    def _preprocess_features(self, X):
+        if self.feature_names is not None:
+            X = X[self.feature_names].values
+        return X
 
-        if self.direction == ModelTypes.BULL.value:
-            args = (self.ds_helper.X['train'], y_vals)
-        elif  self.direction == ModelTypes.BEAR.value:
-            args = (self.ds_helper.X['train'], self.ds_helper.n_buckets - 1 - y_vals)
-        else:
-            raise NotImplementedError(f'Not supported for {self.direction}')
+    def _preprocess_labels(self, y):
+        y_prc = y
+        if self.direction == ModelTypes.BEAR:
+            y_prc = self.n_buckets - 1 - y
+        elif self.direction != ModelTypes.BULL:
+            raise ValueError(f'Unsupported model type: {self.direction}')
+        return y_prc.values
 
-        kwargs = dict(
-            group=self.ds_helper.groups['train'].flatten(), 
-            feature_name=self.ds_helper.feature_names,
-            eval_at=[100],
-            eval_group=[[x] for x in self.ds_helper.groups['validation'].flatten()],
-            eval_set=self.ds_helper.get_eval_set()[self.direction]
-        )
-        self.model.fit(*args, **kwargs)
-
-    def _get_momentum_features(self):
-        mom_features = dict()
-        for window in self.momentum_windows:
-            mom_array = self.feature_store.get_momentum(window)
-            mom_features[f'mom_{window}m'] = mom_array
-
-            vol = self.feature_store.get_volatility(window * 21, min_obs=window * 19)
-            mom_array_norm = mom_array / np.clip(vol, 0.03, np.inf)
-            mom_features[f'mom_{window}m_norm'] = mom_array_norm
-
-            if window > 1:
-                mom_array_lag = self.feature_store.get_momentum(window, lag=1)
-                mom_features[f'mom_{window}m1_norm'] = mom_array_lag / np.clip(vol, 0.03, np.inf)
-        return mom_features
+    def _preprocess_eval_set(self, eval_set):
+        eval_set_prc = []
+        for tp in eval_set:
+            X_orig, y_orig = tp
+            X_adj = self._preprocess_features(X_orig)
+            y_adj = y_orig
+            if self.direction == ModelTypes.BEAR:
+                y_adj = self.n_buckets - 1 - y_orig
+            eval_set_prc.append((X_adj, y_adj))
+        return eval_set_prc
 
 
-class LGBMRankerMomentumBull(LGBMRankerMomentumAbstract):
+class LGBMRankerBull(LGBMRankerAbstract):
     @property
     def direction(self):
-        return ModelTypes.BULL.value
+        return ModelTypes.BULL
 
 
-class LGBMRankerMomentumBear(LGBMRankerMomentumAbstract):
+class LGBMRankerBear(LGBMRankerAbstract):
     @property
     def direction(self):
-        return ModelTypes.BEAR.value
+        return ModelTypes.BEAR
+
+
+class MetaModelAbstract(LGBMRankerAbstract):
+    def __init__(self, input_models, feature_names: list, lgbm_kwargs=None):
+        super().__init__(feature_names=feature_names, lgbm_kwargs=lgbm_kwargs)
+        self.input_models = input_models
+
+    def _preprocess_features(self, X):
+        input_preds = []
+        for m in self.input_models:
+            input_preds.append(m.predict(X))
+        return pd.DataFrame(np.vstack(input_preds).T, 
+                            columns=self.feature_names)
+
+    def fit(self, X, y, **kwargs):
+        kwargs_prc = kwargs.copy()
+        if 'feature_name' in kwargs_prc:
+            kwargs_prc['feature_name'] = self.feature_names
+        return super().fit(X, y, **kwargs_prc)
+
+
+class MetaModelBull(MetaModelAbstract):
+    @property
+    def direction(self):
+        return ModelTypes.BULL
+
+
+class MetaModelBear(MetaModelAbstract):
+    @property
+    def direction(self):
+        return ModelTypes.BEAR

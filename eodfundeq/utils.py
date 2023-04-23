@@ -84,18 +84,19 @@ def rolling_return(arr, n_periods, return_type=None, fillna=True, tol=1e-6):
     empty_rows = np.nan * np.ones((n_periods, arr.shape[1]), dtype=arr.dtype)
     return np.vstack([empty_rows, rtn_vals])
 
-def calc_feature_percentiles(array):
+def calc_feature_percentiles(array, axis=1):
     """Calculate the percentiles across rows for an array of features."""
     order = array.argsort()
     ranks = order.argsort().astype(np.float32)
     ranks[np.isnan(array)] = np.nan
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')
-        percentiles = ranks / np.nanmax(ranks, axis=1, keepdims=True)
+        percentiles = ranks / np.nanmax(ranks, axis=axis, keepdims=True)
     return percentiles
 
 def calc_ndcg(y_true, y_score, k=None, form='exp'):
-    df = pd.DataFrame(np.vstack([y_score, y_true]).T, columns=['score', 'true'])
+    df = pd.DataFrame(np.vstack([y_score.flatten(), y_true.flatten()]).T,
+                      columns=['score', 'true'])
     df.sort_values('score', ascending=False, inplace=True)
     if k is None:
         k = df.shape[0]
@@ -166,7 +167,6 @@ def cross_validate_gbm(model_handle, ds_helper, n_folds=5, k=100, direction='bul
         models.append(model)
     return scores, rtns, models
 
-
 def get_cv_grid_args(params_grid):
     params_list = [dict()]
     for key, vals in params_grid.items():
@@ -179,31 +179,3 @@ def get_cv_grid_args(params_grid):
         params_list = new_params_list
 
     return params_list
-
-def calc_cta_momentum_signals(ts_prices):
-    """Calculate the intermediate CTA Momentum signals following Baz et al.
-    
-    This function calculates the 16 intermediate momentum signals, following
-    the paper 'Dissecting Investment Strategies in the Cross Section and Time Series'
-    by Baz et al, published in 2015.
-    https://www.cmegroup.com/education/files/dissecting-investment-strategies-in-the-cross-section-and-time-series.pdf
-    """
-    S = [8, 16, 32]
-    L = [24, 48, 96]
-
-    HL = lambda n : np.log(0.5) / np.log(1 - 1/n)
-
-    signals = []
-    signal_names = []
-    for j in range(3):
-        x = ts_prices.ewm(halflife=HL(S[j])).mean() - ts_prices.ewm(halflife=HL(L[j])).mean()
-        y = x / ts_prices.rolling(63).std()
-        z = y / y.rolling(252).std()
-        u = x * np.exp(-np.power(x, 2) / 4) / 0.89    
-        signals.extend([x, y, z, u])
-        signal_names.extend([n + str(j) for n in ['x', 'y', 'z', 'u']])
-
-    df_signals_daily = pd.concat(signals, axis=1)
-    df_signals_daily.index = pd.DatetimeIndex(df_signals_daily.index)
-    df_signals_daily.columns = signal_names
-    return df_signals_daily.resample('M').last()
