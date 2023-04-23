@@ -18,7 +18,7 @@ class ReturnTypes(Enum):
     LOG = 'log'
 
 
-class DataSetTypes(Enum):
+class DatasetTypes(Enum):
     """An Enum class enumerating the various data set types."""
     TRAIN = 'train'
     VALIDATION = 'validation'

@@ -15,7 +15,7 @@ import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
 
 from eodfundeq import utils
-from eodfundeq.constants import ReturnTypes, DataSetTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS
+from eodfundeq.constants import ReturnTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS
 from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
 
 from eodhistdata import EODHelper, FundamentalEquitySnapshot, FundamentalEquityTS
