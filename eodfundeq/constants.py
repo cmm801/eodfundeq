@@ -4,6 +4,7 @@ from enum import Enum
 from eodhistdata.constants import FundamentalDataTypes
 
 
+RFR_SYMBOL = 'risk_free_rate'
 START_DATE = '1999-12-31'
 
 

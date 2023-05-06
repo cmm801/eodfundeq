@@ -16,7 +16,7 @@ import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
 
 from eodfundeq import utils
-from eodfundeq.constants import ReturnTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS
+from eodfundeq.constants import ReturnTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS, RFR_SYMBOL
 from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
 
 from eodhistdata import EODHelper, FundamentalEquitySnapshot, FundamentalEquityTS
@@ -24,7 +24,6 @@ from eodhistdata.constants import FundamentalDataTypes, TimeSeriesNames
 
 TRADING_DAYS_PER_MONTH = 21
 TRADING_DAYS_PER_YEAR = 252
-RFR_SYMBOL = 'risk_free_rate'
 
 
 class TSNames(Enum):

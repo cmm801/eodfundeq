@@ -10,7 +10,7 @@ from typing import Optional
 from pyfintools.tools import optim
 from secdb.strategy.core import RebalanceByWeights
 
-from eodfundeq.constants import ModelTypes, ReturnTypes
+from eodfundeq.constants import ModelTypes, ReturnTypes, RFR_SYMBOL
 from eodfundeq import utils
 
 
@@ -57,8 +57,17 @@ def get_selected_returns(model, dataset, daily_prices, return_type, n_stocks=100
     df_symbols = pd.DataFrame(selected_symbols_list, index=pd.DatetimeIndex(period_ends))
     return df_rtns, df_symbols
 
-def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15, n_stocks=100, weighting='equal'):
+def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15,
+                         n_stocks=100, weighting='equal'):
+    """Use the model to get weights on the Top K stocks at each point in time.
+    
+    Returns: (strategy_weights, risk_free_weights)
+        a tuple where the first element is the strategy weights, and the second
+        element is the weights on the risk-free instrument.
+    """
     _, df_symbols = get_selected_arith_returns(model, dataset, daily_prices, n_stocks=n_stocks)
+    risk_free_weights = pd.Series(np.zeros_like(df_symbols.index, dtype=float),
+                                  index=df_symbols.index)
     weights_list = []
     for period_end in df_symbols.index:
         if weighting == 'equal':
@@ -76,6 +85,7 @@ def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15, n_stocks
                 weights = w_0 * target_vol / vol
                 if weights.sum() > 1:
                     weights /= weights.sum()
+                risk_free_weights.loc[period_end] = 1 - weights.sum()
             elif weighting == 'erc':
                 lower_bound = 1/n_stocks * 0.5
                 upper_bound = 1/n_stocks * 2.0
@@ -85,7 +95,8 @@ def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15, n_stocks
             else:
                 raise ValueError(f'Unsupported weighting scheme: {weighting}')
         weights_list.append(weights)
-    return pd.DataFrame(np.vstack(weights_list), index=df_symbols.index)
+    strategy_weights = pd.DataFrame(np.vstack(weights_list), index=df_symbols.index)
+    return strategy_weights, risk_free_weights
 
 def _calculate_covariance(daily_prices, period_end, symbols, n_days=91, price_tol=1e-6):
     period_start = period_end - pd.Timedelta(n_days, unit='d')
@@ -104,11 +115,28 @@ def _calculate_covariance(daily_prices, period_end, symbols, n_days=91, price_to
     return asset_cov
 
 def get_performance(model, dataset, daily_prices, return_window,
-                    n_stocks=100, weighting='equal'):
+                    n_stocks=100, weighting='equal', rf_returns=None):
+    """Calculate the performance of the model using the specified weighting strategy."""
     _, df_symbols = get_selected_log_returns(
         model, dataset, daily_prices, n_stocks=n_stocks)
-    target_wts = get_strategy_weights(model, dataset, daily_prices, weighting=weighting)
-    df_weights = get_portfolio_weights(target_wts, df_symbols, return_window)
+    strat_wts, rf_wts = get_strategy_weights(
+        model, dataset, daily_prices, weighting=weighting)
+
+    # Check that the weights are close to 1
+    if not np.all(np.isclose(strat_wts.sum(axis=1) + rf_wts, 1, atol=1e-6)):
+        raise ValueError('Weights must sum to 1')
+
+    if np.any(rf_wts > 1e-6):
+        rf_levels = (1 + rf_returns).cumprod()
+        rf_levels.name = RFR_SYMBOL
+        rf_wts.name = RFR_SYMBOL
+        daily_prices = pd.concat([daily_prices, rf_levels], axis=1)
+        strat_wts = pd.concat([strat_wts, rf_wts], axis=1)
+        rf_symbols = pd.Series([RFR_SYMBOL] * df_symbols.shape[0],
+                               index=df_symbols.index)
+        df_symbols = pd.concat([df_symbols, rf_symbols], axis=1)
+
+    df_weights = get_portfolio_weights(strat_wts, df_symbols, return_window)
 
     # We exclude stocks from selection if they have low or NaN prices.
     # However, a stock that is selected could have its price become NaN
@@ -128,6 +156,15 @@ def get_performance(model, dataset, daily_prices, return_window,
     return mv_ts
 
 def get_portfolio_weights(target_wts, df_symbols, return_window):
+    """Create a panel of all weights, blended according to the return window.
+    
+    Take as input the target weights of the Top K stocks at each
+    point in time. Use these to create a panel containing all stocks
+    that the strategy invests in between the start/end date.
+    
+    When the return window is not 1, then we average across the 
+    universe of stocks that are selected, rebalancing on a monthly basis.
+    """
     uniq_symbols = sorted(set(df_symbols.values.flatten()))
     dates = list(df_symbols.index.values)
     for j in range(1, return_window):
@@ -140,7 +177,6 @@ def get_portfolio_weights(target_wts, df_symbols, return_window):
         for j in range(return_window):
             idx_t = idx + pd.tseries.offsets.MonthEnd(j)
             df_weights.loc[idx_t, df_symbols.loc[idx]] += target_wts.loc[idx].values
-
     return df_weights / df_weights.sum(axis=1).values.reshape(-1, 1)
 
 def get_ndcg(model, dataset, n_buckets, n_stocks=100):
