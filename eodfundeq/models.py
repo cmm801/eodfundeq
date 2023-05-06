@@ -77,7 +77,6 @@ class RandomModel(PredictionModel):
 class LGBMRankerAbstract(PredictionModel):
     def __init__(self, feature_names: Union[str, list, None] = None, lgbm_kwargs=None):
         super().__init__(feature_names=feature_names)
-        self.feature_names = feature_names
         self.lgbm_kwargs = dict if lgbm_kwargs is None else lgbm_kwargs
         self.model = lgb.LGBMRanker(**lgbm_kwargs)
         self.n_buckets = None
@@ -128,6 +127,57 @@ class LGBMRankerBull(LGBMRankerAbstract):
 
 
 class LGBMRankerBear(LGBMRankerAbstract):
+    @property
+    def direction(self):
+        return ModelTypes.BEAR
+
+
+class BBModelAbstract(PredictionModel):
+    def __init__(self, model, antag_model, fraction: float = 0.1, k: int = 100,
+                 feature_names: Union[str, list, None] = None):
+        super().__init__(feature_names=feature_names)
+        self.model = model
+        self.antag_model = antag_model
+        self.fraction = fraction
+        self.k = k
+
+    def fit(self, X, y, **kwargs):
+        pass
+
+    # Implement abstract method
+    def predict(self, X):
+        mask = np.ones((X.shape[0],), dtype=bool)
+
+        finished = False
+        while not finished:
+            y_score = self.model.predict(X)
+            idx = y_score <= np.quantile(y_score[mask], self.fraction)
+            if mask.sum() - mask[idx].sum() >= self.k:
+                mask[idx] = False
+            else:
+                finished = True
+
+            y_score[mask] = self.antag_model.predict(X[mask])
+            idx = y_score >= np.quantile(y_score[mask], 1 - self.fraction)
+            if mask.sum() - mask[idx].sum() >= self.k:
+                mask[idx] = False
+            else:
+                finished = True
+
+        y_score = self.model.predict(X)
+        y_score[~mask] = -10e10
+        assert y_score[mask].min() > -1e6
+        assert mask.sum() >= self.k
+        return y_score
+
+
+class BBModelBull(BBModelAbstract):
+    @property
+    def direction(self):
+        return ModelTypes.BULL
+
+
+class BBModelBear(BBModelAbstract):
     @property
     def direction(self):
         return ModelTypes.BEAR
