@@ -11,6 +11,7 @@ import scipy.stats
 from collections.abc import Iterable
 from enum import Enum
 
+import findatadownload
 import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
 
@@ -23,6 +24,7 @@ from eodhistdata.constants import FundamentalDataTypes, TimeSeriesNames
 
 TRADING_DAYS_PER_MONTH = 21
 TRADING_DAYS_PER_YEAR = 252
+RFR_SYMBOL = 'risk_free_rate'
 
 
 class TSNames(Enum):
@@ -330,7 +332,7 @@ class FeatureStore(object):
         else:
             raise ValueError(f'Unsupported return type: {return_type}')
 
-    def get_volatility(self, window: int, return_type=ReturnTypes.LOG.value, min_obs=None, fillna=True):
+    def get_volatility(self, window: int, min_obs=None):
         daily_prices = self.daily_prices
         daily_log_rtns = np.log(np.maximum(daily_prices, self.price_tol) / \
                                 np.maximum(daily_prices.shift(1).values, self.price_tol))
@@ -342,6 +344,32 @@ class FeatureStore(object):
             return monthly_vol.values
         else:
             raise ValueError('Unexpected dates found in rolling vol.')
+
+    def get_risk_free_rate(self, maturity='1m'):
+        """Get a time series for the risk-free rate."""
+        if maturity == '1m':
+            base_ticker='DGS1MO'
+        else:
+            raise NotImplementedError('Only implemented for maturity of 1-month')
+
+        rfr_ts = findatadownload.download_time_series(
+            data_source='fred', base_ticker=base_ticker, start=self.start)
+        rfr_ts = rfr_ts.reindex(self.dates['b'])
+        rfr_ts = rfr_ts.squeeze()  # Convert to pandas Series
+        rfr_ts.name = RFR_SYMBOL
+        return rfr_ts
+
+    def get_risk_free_returns(self, maturity='1m'):
+        """Get a time series representing returns from investing in risk-free rate"""
+        rfr_ts = self.get_risk_free_rate(maturity=maturity)
+
+        # Need to accumulate extra returns based on elapsed days
+        # (e.g., we earn risk-free-rate for 3 days over weekend but 1 day otherwise)
+        n_day_diff = pd.Series(np.hstack([
+            [np.nan], 
+            np.array((rfr_ts.index[1:] - rfr_ts.index[:-1]) / pd.Timedelta('1d'))
+        ]), index=rfr_ts.index)
+        return -1 + np.power(1 + rfr_ts.shift(1) / 365 / 100, n_day_diff)
 
     def get_cta_momentum_signals(self):
         """Calculate the intermediate CTA Momentum signals following Baz et al for all symbols.
