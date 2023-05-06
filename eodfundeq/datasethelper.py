@@ -158,7 +158,7 @@ class DatasetHelper(object):
             elif n_months == 3:
                 n_days, min_obs = 126, 120
             elif n_months == 6:
-                n_days, min_obs = 252, 240                
+                n_days, min_obs = 252, 240
             else:
                 raise NotImplementedError('The volatility window corresponding to this return window has not been chosen.')
 

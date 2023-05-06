@@ -68,15 +68,20 @@ def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15, n_stocks
             asset_cov = _calculate_covariance(daily_prices, period_end, period_symbols, n_days=91)
             if weighting == 'minvar':
                 weights, _ = optim.optimize_min_variance(asset_cov, ub=0.05)
-                assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'                
+                assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'
             elif weighting == 'vol':
                 realized_vol = np.diag(asset_cov)
-                weights = 1/n_stocks * np.minimum(target_vol / realized_vol, 1.2)
+                w_0 = 1 / (n_stocks * np.minimum(realized_vol, 0.03))
+                vol = np.sqrt(w_0 @ asset_cov @ w_0)
+                weights = w_0 * target_vol / vol
+                if weights.sum() > 1:
+                    weights /= weights.sum()
             elif weighting == 'erc':
-                lb = 1/n_stocks * 0.5
-                ub = 1/n_stocks * 2.0
-                weights = optim.optimize_erc(asset_cov, vol_lb=target_vol, vol_ub=target_vol,
-                    lb=lb, ub=ub, unit_constraint=True)
+                lower_bound = 1/n_stocks * 0.5
+                upper_bound = 1/n_stocks * 2.0
+                weights = optim.optimize_erc(
+                    asset_cov, vol_lb=target_vol, vol_ub=target_vol,
+                    lb=lower_bound, ub=upper_bound, unit_constraint=True)
             else:
                 raise ValueError(f'Unsupported weighting scheme: {weighting}')
         weights_list.append(weights)
@@ -93,24 +98,24 @@ def _calculate_covariance(daily_prices, period_end, symbols, n_days=91, price_to
 
     # Calculate covariance with pandas, which may be non positive definite if there are NaNs
     asset_cov_non_pos_def = rtns.cov() * 252
-    
+
     # Shift to nearest positive definite covariance
     asset_cov = cov_nearest(asset_cov_non_pos_def, threshold=1e-6)
     return asset_cov
 
-def get_performance(model, dataset, daily_prices, return_window, 
+def get_performance(model, dataset, daily_prices, return_window,
                     n_stocks=100, weighting='equal'):
     _, df_symbols = get_selected_log_returns(
         model, dataset, daily_prices, n_stocks=n_stocks)
     target_wts = get_strategy_weights(model, dataset, daily_prices, weighting=weighting)
     df_weights = get_portfolio_weights(target_wts, df_symbols, return_window)
-    
+
     # We exclude stocks from selection if they have low or NaN prices.
     # However, a stock that is selected could have its price become NaN
     # during the investment period. In this case, we just use the last
     # available price until the end of the period.
     df_prices = daily_prices[df_weights.columns.values].ffill()
-        
+
     # Align dates of weights with pricing dates
     idx_dt = df_prices.index.get_indexer(df_weights.index, 'ffill')
     df_weights.index = df_prices.index[idx_dt]
@@ -143,7 +148,7 @@ def get_ndcg(model, dataset, n_buckets, n_stocks=100):
     model_period_ndcg = []
     sorted_timestamps = sorted(set(timestamps))
     for timestamp in sorted_timestamps:
-        idx_t = (timestamp == timestamps)
+        idx_t = timestamp == timestamps
         y_score = model.predict(dataset.X.loc[idx_t,:]).flatten()
         y_true = dataset.y_cls.loc[idx_t].values
         if model.direction == ModelTypes.BEAR:
@@ -151,4 +156,4 @@ def get_ndcg(model, dataset, n_buckets, n_stocks=100):
         ndcg_val = utils.calc_ndcg(y_true, y_score, k=n_stocks, form='exp')
         assert ndcg_val > 0
         model_period_ndcg.append(ndcg_val)
-    return np.array(model_period_ndcg) 
+    return np.array(model_period_ndcg)
