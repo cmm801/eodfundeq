@@ -79,10 +79,10 @@ def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15,
                 weights, _ = optim.optimize_min_variance(asset_cov, ub=0.05)
                 assert np.isclose(weights.sum(), 1.0, atol=0.01), 'Weights must sum to 1.0'
             elif weighting == 'vol':
-                realized_vol = np.diag(asset_cov)
-                w_0 = 1 / (n_stocks * np.minimum(realized_vol, 0.03))
-                vol = np.sqrt(w_0 @ asset_cov @ w_0)
-                weights = w_0 * target_vol / vol
+                predicted_vol = np.maximum(np.sqrt(np.diag(asset_cov)), 0.04)
+                w_0 = target_vol / (n_stocks * predicted_vol)
+                ptf_vol = np.sqrt(w_0 @ asset_cov @ w_0)
+                weights = w_0 * target_vol / ptf_vol
                 if weights.sum() > 1:
                     weights /= weights.sum()
                 risk_free_weights.loc[period_end] = 1 - weights.sum()
@@ -153,7 +153,7 @@ def get_performance(model, dataset, daily_prices, return_window,
     mv_ts, _ = ptf.calc_performance(
         start=df_weights.index[0],
         end=df_weights.index[-1] + pd.tseries.offsets.MonthEnd(return_window))
-    return mv_ts
+    return mv_ts, df_weights
 
 def get_portfolio_weights(target_wts, df_symbols, return_window):
     """Create a panel of all weights, blended according to the return window.
@@ -173,6 +173,7 @@ def get_portfolio_weights(target_wts, df_symbols, return_window):
     wts_init_arr = np.zeros((df_symbols.shape[0] + return_window - 1,
                              len(uniq_symbols)), dtype=np.float32)
     df_weights = pd.DataFrame(wts_init_arr, index=dates, columns=uniq_symbols)
+
     for idx in target_wts.index:
         for j in range(return_window):
             idx_t = idx + pd.tseries.offsets.MonthEnd(j)
