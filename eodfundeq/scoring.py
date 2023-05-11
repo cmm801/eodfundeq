@@ -83,6 +83,7 @@ def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15,
                 w_0 = target_vol / (n_stocks * predicted_vol)
                 ptf_vol = np.sqrt(w_0 @ asset_cov @ w_0)
                 weights = w_0 * target_vol / ptf_vol
+                print(model.__class__.__name__, weighting, np.median(predicted_vol))
                 if weights.sum() > 1:
                     weights /= weights.sum()
                 risk_free_weights.loc[period_end] = 1 - weights.sum()

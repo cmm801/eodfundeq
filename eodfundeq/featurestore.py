@@ -16,30 +16,17 @@ import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
 
 from eodfundeq import utils
-from eodfundeq.constants import ReturnTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS, RFR_SYMBOL
-from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
+from eodfundeq.constants import ReturnTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS, RFR_SYMBOL, TSNames, TRADING_DAYS_PER_MONTH, TRADING_DAYS_PER_YEAR
 
 from eodhistdata import EODHelper, FundamentalEquitySnapshot, FundamentalEquityTS
 from eodhistdata.constants import FundamentalDataTypes, TimeSeriesNames
-
-TRADING_DAYS_PER_MONTH = 21
-TRADING_DAYS_PER_YEAR = 252
-
-
-class TSNames(Enum):
-    ADJUSTED_CLOSE = TimeSeriesNames.ADJUSTED_CLOSE.value
-    CLOSE = TimeSeriesNames.CLOSE.value
-    DAILY_PRICES = 'daily_prices'
-    MARKET_CAP = 'market_cap'
-    MONTHLY_RETURNS = 'monthly_returns'    
-    VOLUME = TimeSeriesNames.VOLUME.value
 
 
 TIME_SERIES_PANEL_INFO = {
     TSNames.ADJUSTED_CLOSE.value: dict(dtype=np.float32, frequency='m'),
     TSNames.CLOSE.value: dict(dtype=np.float32, frequency='m'),
     TSNames.DAILY_PRICES.value: dict(dtype=np.float32, frequency='b'),
-    TSNames.MARKET_CAP.value: dict(dtype=np.float32, frequency='m'),    
+    TSNames.MARKET_CAP.value: dict(dtype=np.float32, frequency='m'),
     TSNames.MONTHLY_RETURNS.value: dict(dtype=np.float32, frequency='m'),
     TSNames.VOLUME.value: dict(dtype=np.float32, frequency='m'),
 }
@@ -89,9 +76,6 @@ class FeatureStore(object):
             
         # Initialize financial statement data types
         self.fin_data_types = sorted(FUNDAMENTAL_RATIO_INPUTS)
-        
-        # Initialize mask that will tell us if data points are valid
-        self._good_mask = None
 
         # Initialize container for caching calculated volatility
         self._volatility = dict()
@@ -103,13 +87,6 @@ class FeatureStore(object):
         self.price_tol = 1e-4           # Used to make sure we don't divide by 0
         self.fundamental_data_delay = 1 # Months to delay use of fundamental data, to account for
                                         # the fact that it is not immediately available for trading. 
-        self.filter_min_obs = 10        # Excludes dates/metrics with few observations
-        self.filter_min_price = 1       # Excludes stocks with too low of a price
-        self.filter_min_monthly_volume = 21 * 10000  # Exclude stocks with low trading volume
-        self.filter_max_return = 10     # Excludes return outliers from sample
-
-        # Set default filters
-        self.set_default_filters()
 
     @property
     def fundamental_ratios(self):
@@ -118,10 +95,10 @@ class FeatureStore(object):
     def _init_data_rows(self, n_rows, dtype=np.float32):
         return np.ones((n_rows, self.symbols.size), dtype=dtype)
 
-    def _init_data_panel(self, dtype=np.float32, frequency='m'):
+    def init_data_panel(self, dtype=np.float32, frequency='m'):
         return self._init_data_rows(self.dates[frequency].size, dtype=dtype)
 
-    def _init_pd_dataframe(self, frequency, dtype=np.float32):
+    def init_pd_dataframe(self, frequency, dtype=np.float32):
         return pd.DataFrame(
             np.ones((self.dates[frequency].size, self.symbols.size), dtype=dtype),
             index=self.dates[frequency], columns=self.symbols)
@@ -141,7 +118,7 @@ class FeatureStore(object):
         for name in ts_types:
             kwargs = TIME_SERIES_PANEL_INFO[name.value]
             default_val = 0.0 if name.value == TSNames.VOLUME.value else np.nan
-            self._time_series[name.value] = default_val * self._init_pd_dataframe(**kwargs)
+            self._time_series[name.value] = default_val * self.init_pd_dataframe(**kwargs)
 
         for idx_symbol, symbol in enumerate(self.symbols):
             daily_ts = self.eod_helper.get_historical_data(
@@ -215,7 +192,7 @@ class FeatureStore(object):
         kwargs = TIME_SERIES_PANEL_INFO[mc_name]
         if mc_name in self._time_series:
             return  # Time series already loaded
-        self._time_series[mc_name] = np.nan * self._init_pd_dataframe(**kwargs)
+        self._time_series[mc_name] = np.nan * self.init_pd_dataframe(**kwargs)
         for idx_symbol, symbol in enumerate(self.symbols):
             raw_ts = self.eod_helper.get_market_cap(
                 symbol, start=self.start, stale_days=self.stale_days)
@@ -229,53 +206,12 @@ class FeatureStore(object):
                 self._time_series[mc_name].loc[monthly_ts.index[idx_shared], symbol] = \
                     monthly_ts.values[idx_shared].flatten().astype(np.float32)
 
-    def set_default_filters(self):
-        self._good_mask = None
-        self._filters = [
-            IsNotNAFilter(self, TSNames.CLOSE.value),
-            IsNotNAFilter(self, TSNames.ADJUSTED_CLOSE.value),
-            IsNotNAFilter(self, TSNames.ADJUSTED_CLOSE.value,
-                          property_func=lambda x: x.rolling(12).mean()),
-            InRangeFilter(self, TSNames.DAILY_PRICES.value, high=3, high_inc=True,
-                          property_func=lambda x: np.isnan(x).rolling(63).sum().resample('M').last()),
-            IsNotNAFilter(self, TSNames.VOLUME.value),
-            InRangeFilter(self, TSNames.CLOSE.value,
-                          low=self.filter_min_price),
-            InRangeFilter(self, TSNames.ADJUSTED_CLOSE.value,
-                          low=self.filter_min_price),
-            InRangeFilter(self, TSNames.VOLUME.value,
-                          property_func=lambda x: x.rolling(12).quantile(0.01, interpolation='lower'),
-                          low=self.filter_min_monthly_volume),
-            EntireColumnInRangeFilter(self, TSNames.MONTHLY_RETURNS.value,
-                                      high=self.filter_max_return)
-        ]
-
-    def reset_default_filters(self):
-        self.set_default_filters()
-
-    def add_filter(self, f):
-        self._good_mask = None
-        self._filters.append(f)
-
-    @property
-    def filters(self):
-        return self._filters
-
-    @property
-    def good_mask(self):
-        if self._good_mask is None:
-            self._good_mask = self._init_pd_dataframe(frequency='m', dtype=bool)
-            for f in self.filters:
-                self._good_mask &= f.get_mask()
-
-        return self._good_mask.values
-
     @property
     def adjusted_close(self):
         if not len(self._time_series):
             self.load_ohlcv_data()
         return self._time_series[TSNames.ADJUSTED_CLOSE.value]
-        
+
     @property
     def close(self):
         if not len(self._time_series):
@@ -316,6 +252,12 @@ class FeatureStore(object):
         else:
             raise ValueError(f'Unsupported return type: {return_type}')
 
+    def get_future_realized_volatility(self, forecast_horizon: int,
+                                       min_fraction: float = 0.9, frequency: str = 'm'):
+        realized_vol = pd.DataFrame(self.get_realized_volatility(
+            window=forecast_horizon, min_fraction=min_fraction, frequency=frequency))
+        return realized_vol.shift(-forecast_horizon).values
+
     def get_momentum(self, window, return_type=ReturnTypes.LOG.value, lag=0):
         if lag < 0:
             raise ValueError(f'Momentum lag must be positive. Found lag={lag}')
@@ -331,36 +273,71 @@ class FeatureStore(object):
         else:
             raise ValueError(f'Unsupported return type: {return_type}')
 
-    def get_volatility(self, window: int, min_obs=None):
-        daily_prices = self.daily_prices
-        daily_log_rtns = np.log(np.maximum(daily_prices, self.price_tol) / \
-                                np.maximum(daily_prices.shift(1).values, self.price_tol))
-        daily_log_rtns.values[np.isclose(self.daily_prices, 0)] = np.nan
-        rolling_daily_vol = daily_log_rtns.rolling(window, axis=0, min_periods=min_obs).std() * \
-                            np.sqrt(TRADING_DAYS_PER_YEAR)
-        monthly_vol = rolling_daily_vol.resample('M').last()
-        if np.all(monthly_vol.index.values == self.dates['m']):
-            return monthly_vol.values
+    def get_log_price_returns(self, frequency='b'):
+        """Get the log price returns for a specified frequency."""
+        if frequency == 'm':
+            prices = self.adjusted_close
         else:
-            raise ValueError('Unexpected dates found in rolling vol.')
+            prices = self.daily_prices
+        log_returns = np.log(np.maximum(prices, self.price_tol) /  \
+                             np.maximum(prices.shift(1).values, self.price_tol))
+        log_returns[np.isclose(prices.values, 0)] = np.nan
+        log_returns[np.isclose(prices.shift(1).values, 0)] = np.nan
+        return log_returns
 
-    def get_risk_free_rate(self, maturity='1m'):
+    def get_realized_volatility(self, window: int, min_fraction=0.9, frequency='m'):
+        """Calculate the realized volatility over rolling windows."""
+        # Get the daily prices, and convert to target frequency afterwards
+        daily_log_rtns = self.get_log_price_returns(frequency='b')
+        minp = int(window * min_fraction)
+        rolling_std = daily_log_rtns.rolling(window, axis=0, min_periods=minp).std()
+        rolling_vol = rolling_std * np.sqrt(TRADING_DAYS_PER_YEAR)
+        if frequency == 'm':
+            rolling_vol = rolling_vol.resample('M').last()
+        if ~np.all(rolling_vol.index.values == self.dates[frequency]):
+            raise ValueError('Unexpected dates found in rolling vol.')
+        return rolling_vol.values
+
+    def get_risk_free_rate(self, maturity='1m', frequency='b'):
         """Get a time series for the risk-free rate."""
         if maturity == '1m':
             base_ticker='DGS1MO'
         else:
             raise NotImplementedError('Only implemented for maturity of 1-month')
+        return self._get_fred_ts(base_ticker, frequency)
 
-        rfr_ts = findatadownload.download_time_series(
+    def get_vix(self, frequency='b'):
+        """Get time series for VIX."""
+        base_ticker = 'VIXCLS'
+        return self._get_fred_ts(base_ticker, frequency)
+
+    def get_us_equity_tr_index(self, frequency='b'):
+        """Get time series for US equity total return Index (Wilshire 5000)"""
+        base_ticker = 'WILL5000IND'
+        return self._get_fred_ts(base_ticker, frequency)
+
+    def create_panel_from_time_series(self, ts_vals):
+        """Create a data panel with copies of a time series."""
+        if isinstance(ts_vals, (pd.Series, pd.DataFrame)):
+            ts_vals = ts_vals.values
+        return np.tile(ts_vals.reshape(-1, 1), self.symbols.size)
+
+    def create_panel_from_row(self, row_data, frequency):
+        """Create a data panel with copies of a data row at a point in time."""
+        return np.tile(row_data.reshape(-1, 1), len(self.dates[frequency])).T
+
+    def _get_fred_ts(self, base_ticker, frequency):
+        ts = findatadownload.download_time_series(
             data_source='fred', base_ticker=base_ticker, start=self.start)
-        rfr_ts = rfr_ts.reindex(self.dates['b'])
-        rfr_ts = rfr_ts.squeeze()  # Convert to pandas Series
-        rfr_ts.name = RFR_SYMBOL
-        return rfr_ts
+        ts = ts.reindex(self.dates[frequency])
+        ts = ts.squeeze()  # Convert to pandas Series
+        ts.name = base_ticker
+        return ts
 
     def get_risk_free_returns(self, maturity='1m'):
         """Get a time series representing returns from investing in risk-free rate"""
         rfr_ts = self.get_risk_free_rate(maturity=maturity)
+        rfr_ts.name = RFR_SYMBOL
 
         # Need to accumulate extra returns based on elapsed days
         # (e.g., we earn risk-free-rate for 3 days over weekend but 1 day otherwise)
@@ -412,7 +389,7 @@ class FeatureStore(object):
         # Initialize the financial data arrays
         fin_data = dict()
         for fin_data_type in self.fin_data_types:
-            fin_data[fin_data_type] = np.nan * self._init_data_panel()
+            fin_data[fin_data_type] = np.nan * self.init_data_panel()
 
         # For each symbol in our universe, get time series for all required input data types
         n_dates = self.dates[frequency].size        

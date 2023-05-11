@@ -1,13 +1,40 @@
 import numpy as np
 import pandas as pd
 
+from abc import ABC, abstractmethod
 from typing import Optional
 
-from eodfundeq.constants import DatasetTypes, ModelTypes
+from eodfundeq.constants import DatasetTypes, ForecastTypes, ModelTypes, TSNames, TRADING_DAYS_PER_YEAR
 from eodfundeq import utils
 
+from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
 
-class TrainingIntervals(object):
+
+class TrainingIntervalsAbstract(ABC):
+    """Abstract class for getting train/validation/test intervals."""
+
+    @abstractmethod
+    def get_all_intervals(self):
+        """Returns a dict with a map from Dataset type to start/end date tuple."""
+
+    def get_intervals(self, dataset_type):
+        """Provide the start/end date for a specified dataset."""
+        return self.get_all_intervals()[dataset_type]
+
+    def get_train_intervals(self):
+        """Provide the start/end date for the training dataset."""
+        return self.get_intervals(DatasetTypes.TRAIN)
+
+    def get_validation_intervals(self):
+        """Provide the start/end date for the validation dataset."""
+        return self.get_intervals(DatasetTypes.VALIDATION)
+
+    def get_test_intervals(self):
+        """Provide the start/end date for the test dataset."""
+        return self.get_intervals(DatasetTypes.TEST)
+
+
+class TrainingIntervalsByPeriod(TrainingIntervalsAbstract):
     def __init__(self, data_start='1999-12-31', data_end='2022-12-31', train_start='2003-12-31',
         num_embargo_periods=12, n_months_valid=36, n_months_test=18):
 
@@ -20,7 +47,8 @@ class TrainingIntervals(object):
         self.n_months_test = n_months_test
         self._temp_filename = None
 
-    def get_intervals(self):
+    # Implement abstract method
+    def get_all_intervals(self):
         intervals = dict()
         test_start = self.data_end - pd.tseries.offsets.MonthEnd(self.n_months_test)
         intervals[DatasetTypes.TEST] = (test_start, self.data_end)
@@ -31,21 +59,37 @@ class TrainingIntervals(object):
         intervals[DatasetTypes.TRAIN] = (self.train_start, train_end)
         return intervals
 
+
+class TrainingIntervalsCustom(TrainingIntervalsAbstract):
+    """Class that provides custom specified train/validation/test intervals"""
+
+    def __init__(self, start_train, end_train, start_valid, end_valid,
+                 start_test, end_test):
+        self.start_train = pd.Timestamp(start_train)
+        self.end_train = pd.Timestamp(end_train)
+        self.start_valid = pd.Timestamp(start_valid)
+        self.end_valid = pd.Timestamp(end_valid)
+        self.start_test = pd.Timestamp(start_test)
+        self.end_test = pd.Timestamp(end_test)
+
+    # Implement abstract method
+    def get_all_intervals(self):
+        """Returns a dict with a map from Dataset type to start/end date tuple."""
+        return {
+            DatasetTypes.TRAIN: (self.start_train, self.end_train),
+            DatasetTypes.VALIDATION: (self.start_valid, self.end_valid),
+            DatasetTypes.TEST: (self.start_test, self.end_test),
+        }
+
     
 class Dataset(object):
-    def __init__(self,
-                 X: pd.DataFrame, 
-                 y_reg: Optional[pd.DataFrame] = None,
-                 y_cls: Optional[pd.DataFrame] = None,
-                 y_pct: Optional[pd.DataFrame] = None,
-                 metadata: Optional[pd.DataFrame] = None,
-                 true_return: Optional[pd.DataFrame] = None):
+    def __init__(self, X: pd.DataFrame, y: Optional[pd.DataFrame] = None,
+                 metadata: Optional[pd.DataFrame] = None, is_sorted=False):
+        self.is_sorted = False
         self.X = X
-        self.y_reg = y_reg if y_reg is not None else pd.DataFrame()
-        self.y_cls = y_cls if y_cls is not None else pd.DataFrame()
-        self.y_pct = y_pct if y_pct is not None else pd.DataFrame()        
+        self.y = y if y is not None else pd.DataFrame()
         self.metadata = metadata if metadata is not None else pd.DataFrame()
-        self.true_return = true_return if true_return is not None else pd.DataFrame()
+        self.is_sorted = is_sorted
 
     @property
     def timestamp(self):
@@ -54,6 +98,26 @@ class Dataset(object):
     @property
     def symbol(self):
         return self.metadata.symbol
+
+    def sort_by_timestamp(self):
+        if not self.is_sorted:
+            sort_idx = np.argsort(self.timestamp)
+            self.X = self.X.loc[sort_idx]
+            self.y = self.y.loc[sort_idx]
+            self.metadata = self.metadata.loc[sort_idx]
+            self.is_sorted = True
+
+    def get_cv_group_index(self, n_splits=5):
+        bin_edges = np.linspace(0, 1, n_splits+1)[1:-1]
+        if not self.is_sorted:
+            self.sort_by_timestamp()
+        uniq_timestamps = sorted(set(self.timestamp.drop_duplicates().values))
+        timestamps = self.timestamp.values
+        bin_edges = np.linspace(0, len(uniq_timestamps), n_splits+1)[1:-1].astype(int)
+        groups = n_splits * np.ones_like(timestamps, dtype=int)
+        for j, bin_edge in enumerate(bin_edges[::-1]):
+            groups[timestamps <= uniq_timestamps[bin_edge]] = n_splits - j - 1
+        return groups
 
 
 class DataGroup(object):
@@ -65,14 +129,8 @@ class DataGroup(object):
     def X(self):
         return {dst: self.data[dst].X for dst in DatasetTypes}
 
-    def y_reg(self):
-        return {dst: self.data[dst].y_reg for dst in DatasetTypes}
-
-    def y_cls(self):
-        return {dst: self.data[dst].y_cls for dst in DatasetTypes}
-
-    def y_pct(self):
-        return {dst: self.data[dst].y_pct for dst in DatasetTypes}
+    def y(self):
+        return {dst: self.data[dst].y for dst in DatasetTypes}
 
     def metadata(self):
         return {dst: self.data[dst].metadata for dst in DatasetTypes}
@@ -83,21 +141,37 @@ class DataGroup(object):
     def timestamp(self):
         return {dst: self.data[dst].timestamp for dst in DatasetTypes}
 
-    def true_return(self):
-        return {dst: self.data[dst].true_return for dst in DatasetTypes}
-
 
 class DatasetHelper(object):
-    def __init__(self, feature_store, training_intervals, features_dict=None,
-                 return_window=3, norm_returns=True, exclude_nan_features=False, n_buckets=5):
+    def __init__(self, feature_store, training_intervals, forecast_horizon,
+                 features_dict=None, frequency='m',
+                 forecast_type=ForecastTypes.NORM_RETURNS.value,
+                 exclude_nan_features=False, n_buckets=0, min_data_fraction=0.9):
         self.feature_store = feature_store
+        self.frequency = frequency
         self._training_intervals = training_intervals
-        self.return_window = return_window
-        self.norm_returns = norm_returns
+        self.forecast_horizon = forecast_horizon
+        self.forecast_type = forecast_type
         self.exclude_nan_features = exclude_nan_features
         self.n_buckets = n_buckets
-        self._features_dict = dict() if features_dict is None else features_dict
-        self._volatility = dict()
+        self.min_data_fraction = min_data_fraction
+        self._features_dict = {} if features_dict is None else features_dict
+        self.volatility_tol = 0.01  # lower bound on vol to prevent taking Log(0)
+
+        # Initialize dict to cache volatility calculations
+        self._volatility_cache = {}
+
+        # Initialize mask that will tell us if data points are valid
+        self._good_mask = None
+        self._filters = []
+
+        self.filter_min_obs = 10        # Excludes dates/metrics with few observations
+        self.filter_min_price = 1       # Excludes stocks with too low of a price
+        self.filter_min_monthly_volume = 21 * 10000  # Exclude stocks with low trading volume
+        self.filter_max_return = 10     # Excludes return outliers from sample
+
+        # Set default filters
+        self.set_default_filters()
 
     @property
     def features_dict(self):
@@ -122,37 +196,95 @@ class DatasetHelper(object):
 
     @training_intervals.setter
     def training_intervals(self, ti):
-        assert isinstance(ti, TrainingIntervals), 'Unsupported input type for training_intervals.'
+        assert isinstance(ti, TrainingIntervalsAbstract), 'Unsupported input type for training_intervals.'
         self._training_intervals = ti
 
     @property
-    def labels(self):
-        pass
+    def filters(self):
+        return self._filters
 
     @property
-    def features(self):
-        pass
+    def good_mask(self):
+        if self._good_mask is None:
+            self._good_mask = self.feature_store.init_pd_dataframe(
+                frequency=self.frequency, dtype=bool)
+            for f in self.filters:
+                self._good_mask &= f.get_mask()
 
-    def get_dataframe(self):
-        df_base = self._get_base_dataframe()        
+        return self._good_mask.values
+
+    @property
+    def symbols(self):
+        return self.feature_store.symbols
+
+    def get_dataframe(self, sort=False):
+        df_base = self._get_base_dataframe()
         df = self._add_dataset_type(df_base)
-        return self._add_bucketed_returns(df)
+        if sort:
+            return df.sort_values('timestamp')
+        else:
+            return df
 
-    def get_datagroup(self):
-        df = self.get_dataframe()
-        ds_group_args = dict()
+    def get_datagroup(self, sort=False):
+        df = self.get_dataframe(sort=sort)
+        ds_group_args = {}
         for ds_type in DatasetTypes:
             sub_df = df.loc[df.dataset_type.values == ds_type.value]
             ds_group_args[ds_type] = Dataset(X=sub_df[self.feature_names],
-                                             y_reg=sub_df.y_reg,
-                                             y_cls=sub_df.y_cls,
-                                             y_pct=sub_df.y_pct,
+                                             y=sub_df.y,
                                              metadata=sub_df[self.metadata_names],
-                                             true_return=sub_df.true_return)
+                                             is_sorted=sort)
         return ds_group_args
 
-    def _get_volatility(self, n_months):
-        if n_months not in self._volatility:
+    def set_default_filters(self):
+        self._good_mask = None
+        if self.frequency == 'm':
+            self.set_default_filters_monthly()
+        if self.frequency == 'b':
+            self.set_default_filters_daily()
+        
+    def set_default_filters_monthly(self):
+        fs = self.feature_store
+        self._filters = [
+            IsNotNAFilter(fs, TSNames.CLOSE.value),
+            IsNotNAFilter(fs, TSNames.ADJUSTED_CLOSE.value),
+            IsNotNAFilter(fs, TSNames.ADJUSTED_CLOSE.value,
+                          property_func=lambda x: x.rolling(12).mean()),
+            InRangeFilter(fs, TSNames.DAILY_PRICES.value, high=3, high_inc=True,
+                          property_func=lambda x: np.isnan(x).rolling(63).sum().resample('M').last()),
+            IsNotNAFilter(fs, TSNames.VOLUME.value),
+            InRangeFilter(fs, TSNames.CLOSE.value,
+                          low=self.filter_min_price),
+            InRangeFilter(fs, TSNames.ADJUSTED_CLOSE.value,
+                          low=self.filter_min_price),
+            InRangeFilter(fs, TSNames.VOLUME.value, 
+                          property_func=lambda x: x.rolling(12).quantile(0.01, interpolation='lower'),
+                          low=self.filter_min_monthly_volume),
+            EntireColumnInRangeFilter(fs, TSNames.MONTHLY_RETURNS.value, high=self.filter_max_return)
+        ]
+        
+    def set_default_filters_daily(self):
+        fs = self.feature_store        
+        self._filters = [
+            IsNotNAFilter(fs, TSNames.DAILY_PRICES.value),
+            InRangeFilter(fs, TSNames.DAILY_PRICES.value,
+                          low=self.filter_min_price),
+            InRangeFilter(fs, TSNames.DAILY_PRICES.value,
+                          property_func=lambda x: x.rolling(63, min_periods=1).min(),
+                          low=self.filter_min_price),
+            InRangeFilter(fs, TSNames.DAILY_PRICES.value, high=self.filter_max_return,
+                          property_func=lambda x: x.pct_change())
+        ]
+
+    def reset_default_filters(self):
+        self.set_default_filters()
+
+    def add_filter(self, f):
+        self._good_mask = None
+        self._filters.append(f)
+
+    def _get_volatility_forecast(self, n_months):
+        if n_months not in self._volatility_cache:
             if n_months == 1:
                 n_days, min_obs = 63, 60
             elif n_months == 3:
@@ -162,51 +294,78 @@ class DatasetHelper(object):
             else:
                 raise NotImplementedError('The volatility window corresponding to this return window has not been chosen.')
 
-            self._volatility[n_months] = self.feature_store.get_volatility(n_days, min_obs=min_obs)
-        return self._volatility[n_months]
+            self._volatility_cache[n_months] = self.feature_store.get_volatility(n_days, min_obs=min_obs)
+        return np.maximum(self._volatility_cache[n_months], 0.03)
 
-    def _get_returns(self):
-        future_returns = self.feature_store.get_future_returns(self.return_window)
-        mask = self.feature_store.good_mask
-        true_rtn = pd.Series(future_returns[mask], name='true_return')
-        if not self.norm_returns:
-            y = future_returns.copy()
+    def flatten_panel(self, panel):
+        """Takes a data panel and flattens it into a single-column."""
+        return panel[self.good_mask]
+
+    def _get_labels(self):
+        if self.forecast_type == ForecastTypes.VOLATILITY.value:
+            y_panel = self._get_volatility_labels()
+        elif self.forecast_type == ForecastTypes.LOG_VOLATILITY.value:
+            y_panel = np.log(np.maximum(self._get_volatility_labels(), self.volatility_tol))
+        elif self.forecast_type in (ForecastTypes.RETURNS.value, ForecastTypes.NORM_RETURNS.value):
+            y_panel = self._get_return_labels()
         else:
-            volatility = self._get_volatility(self.return_window)
-            y = future_returns / np.maximum(volatility, 0.03)
-        y_reg = pd.Series(y[mask], name='y_reg')
-        assert y_reg.size == true_rtn.size, 'Returns are of different length'
-        return pd.concat([true_rtn, y_reg], axis=1)         
+            raise ValueError(f'Unsupported forecast type: {self.forecast_type}')
+        return pd.DataFrame(self.flatten_panel(y_panel), columns=['y'])
+
+    def _get_volatility_labels(self):
+        return self.feature_store.get_future_realized_volatility(
+            forecast_horizon=self.forecast_horizon,
+            min_fraction=self.min_data_fraction,
+            frequency=self.frequency)
+
+    def _get_return_labels(self):
+        y_panel = self.feature_store.get_future_returns(self.forecast_horizon)
+        if self.forecast_type == ForecastTypes.NORM_RETURNS.value:
+            volatility = self._get_volatility_forecast(self.forecast_horizon)
+            y_panel /= volatility
+
+        if self.n_buckets > 0:
+            y_panel = utils.bucket_features(y_panel, self.n_buckets, axis=1)
+        return y_panel
+
+    def add_feature_panel(self, feature_name, feature_panel):
+        self.features_dict[feature_name] = self.flatten_panel(feature_panel)
 
     def _get_features(self):
-        mask = self.feature_store.good_mask
         features_df_list = []
         for feature_name in self.feature_names:
-            df = pd.Series(self.features_dict[feature_name][mask],
-                           name=feature_name)
+            df = pd.Series(self.features_dict[feature_name], name=feature_name)
             features_df_list.append(df)
-        assert len(set([x.size for x in features_df_list])) == 1, 'Features are of different lengths'
-        return pd.concat(features_df_list, axis=1)
+        if len(set([x.size for x in features_df_list])) != 1:
+            raise ValueError('Features are of different lengths')
+        df_features = pd.concat(features_df_list, axis=1)
+        if self.forecast_type == ForecastTypes.LOG_VOLATILITY.value:
+            df_features = np.log(np.maximum(df_features, self.volatility_tol))
+        return df_features
+
+    def create_panel_from_time_series(self, ts):
+        """Create a data panel with copies of a time series."""
+        return np.tile(ts.values.reshape(-1, 1), self.symbols.size)
 
     def _get_metadata(self):
-        mask = self.feature_store.good_mask
-        dates = self.feature_store.dates['m'].values
-        date_panel = np.tile(dates.reshape(-1, 1), len(self.feature_store.symbols))
-        df_timestamp = pd.Series(date_panel[mask], name='timestamp')
-        symbol_panel = np.tile(self.feature_store.symbols.reshape(-1, 1), len(dates)).T
-        df_symbols = pd.Series(symbol_panel[mask], name='symbol')
+        dates = self.feature_store.dates[self.frequency].values
+        date_panel = self.feature_store.create_panel_from_time_series(dates)
+        df_timestamp = pd.Series(self.flatten_panel(date_panel), name='timestamp')
+        symbol_panel = self.feature_store.create_panel_from_row(
+            self.feature_store.symbols, frequency=self.frequency)
+        df_symbols = pd.Series(self.flatten_panel(symbol_panel), name='symbol')
         metadata_list = [df_timestamp, df_symbols]
         assert len(set([x.size for x in metadata_list])) == 1, 'Data is of different lengths'
         return pd.concat(metadata_list, axis=1)
 
     def _get_base_dataframe(self):
         df_features = self._get_features()
-        df_returns = self._get_returns()
+        df_labels = self._get_labels()
         df_metadata = self._get_metadata()
-        assert df_features.shape[0] == df_returns.shape[0]
+        assert df_features.shape[0] == df_labels.shape[0]
         assert df_features.shape[0] == df_metadata.shape[0]
-        df = pd.concat([df_features, df_returns, df_metadata], axis=1)
-        idx_no_nan = ~np.isnan(df_returns.true_return) & ~np.isnan(df_returns.y_reg)
+        df = pd.concat([df_features, df_labels, df_metadata], axis=1)
+        idx_no_nan = ~np.isnan(df_labels.y)
         if self.exclude_nan_features:
             idx_no_nan = idx_no_nan & np.all(~np.isnan(df_features), axis=1)
         df = df.loc[idx_no_nan, :]
@@ -218,24 +377,11 @@ class DatasetHelper(object):
         df.set_index('timestamp', inplace=True)
         df.sort_index(inplace=True)
         df['dataset_type'] = ''
-        intervals = self.training_intervals.get_intervals()
+        intervals = self.training_intervals.get_all_intervals()
         for dataset_type, interval in intervals.items():
             start, end = interval
-            df.loc[start:end, 'dataset_type'] = dataset_type.value        
+            df.loc[start:end, 'dataset_type'] = dataset_type.value
         return df.reset_index()
-
-    def _add_bucketed_returns(self, df):
-        df['y_cls'] = -1      # Add new column for classification problems
-        df['y_pct'] = np.nan  # Add new column containing the percentile of the return
-        for tmstmp in set(df.timestamp.values):
-            idx_t = df.timestamp.values == tmstmp
-            if not np.any(idx_t):
-                continue
-
-            df.loc[idx_t, 'y_pct'] = utils.calc_feature_percentiles(df.y_reg.loc[idx_t], axis=0)
-            edges = np.linspace(0, 1, self.n_buckets+1)[:-1]
-            df.loc[idx_t, 'y_cls'] = -1 + np.digitize(df.y_pct.loc[idx_t], edges)
-        return df
 
     def get_lgbmranker_groups(self, dataset):
         # Get the # of samples in each group (aka the # of stocks for each date)
@@ -249,6 +395,6 @@ class DatasetHelper(object):
         for t in sorted(set(timestamps)):
             idx_t = (t == timestamps)
             X = dataset.X.loc[t == timestamps, feature_names]
-            y = dataset.y_cls.loc[t == timestamps]
+            y = dataset.y.loc[t == timestamps]
             eval_set.append((X, y))
         return eval_set

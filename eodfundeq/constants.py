@@ -1,14 +1,36 @@
 """Definitions of important constants."""
 
 from enum import Enum
-from eodhistdata.constants import FundamentalDataTypes
+from eodhistdata.constants import FundamentalDataTypes, TimeSeriesNames
 
 
 RFR_SYMBOL = 'risk_free_rate'
 START_DATE = '1999-12-31'
 
+TRADING_DAYS_PER_MONTH = 21
+TRADING_DAYS_PER_YEAR = 252
+
+
+class TSNames(Enum):
+    """An Enum containing common time series names."""
+    ADJUSTED_CLOSE = TimeSeriesNames.ADJUSTED_CLOSE.value
+    CLOSE = TimeSeriesNames.CLOSE.value
+    DAILY_PRICES = 'daily_prices'
+    MARKET_CAP = 'market_cap'
+    MONTHLY_RETURNS = 'monthly_returns'    
+    VOLUME = TimeSeriesNames.VOLUME.value
+
+
+class ForecastTypes(Enum):
+    """An Enum containing types for which forecasting is supported."""
+    RETURNS = 'returns'
+    NORM_RETURNS = 'norm_returns'
+    VOLATILITY = 'volatility'
+    LOG_VOLATILITY = 'log_volatility'
+
 
 class ModelTypes(Enum):
+    """An Enum containing types of forecasting models."""
     BULL = 'bull'
     BEAR = 'bear'
 
