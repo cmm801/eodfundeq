@@ -4,7 +4,6 @@ import pandas as pd
 
 from abc import abstractmethod, ABC
 from statsmodels.stats.correlation_tools import cov_nearest 
-from pypfopt import HRPOpt
 from typing import Optional
 
 from pyfintools.tools import optim
