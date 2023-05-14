@@ -7,7 +7,8 @@ from abc import ABC, abstractmethod
 
 
 class AbstractFilter(ABC):
-    def __init__(self, instance, property_name, property_func=None, *args, **kwargs):
+
+    def __init__(self, instance, property_name, property_func=None):
         self.instance = instance
         self.property_name = property_name
         self.property_func = property_func if property_func is not None else lambda x: x
@@ -27,8 +28,8 @@ class EqualFilter(AbstractFilter):
         super(EqualFilter, self).__init__(instance, property_name, property_func=property_func)
         self.target_value = target_value
 
-    def get_mask(self):
-        return (self.property_values == self.target_value)
+    def get_mask(self, *args, **kwargs):
+        return self.property_values == self.target_value
 
 
 class InRangeFilter(AbstractFilter):
@@ -41,7 +42,7 @@ class InRangeFilter(AbstractFilter):
         self.low_inc = low_inc
         self.high_inc = high_inc
 
-    def get_mask(self):
+    def get_mask(self, *args, **kwargs):
         if self.low_inc:
             if self.high_inc:
                 return (self.low <= self.property_values) & \
@@ -66,7 +67,7 @@ class EntireColumnInRangeFilter(InRangeFilter):
             low=low, high=high, low_inc=low_inc, high_inc=high_inc, property_func=property_func)
         self.ignore_na = ignore_na
 
-    def get_mask(self):
+    def get_mask(self, *args, **kwargs):
         super_mask = super().get_mask()
         if self.ignore_na:
             super_mask |= np.isnan(self.property_values)
@@ -85,7 +86,7 @@ class EntireRowInRangeFilter(InRangeFilter):
             low=low, high=high, low_inc=low_inc, high_inc=high_inc, property_func=property_func)
         self.ignore_na = ignore_na
 
-    def get_mask(self):
+    def get_mask(self, *args, **kwargs):
         super_mask = super().get_mask()
         if self.ignore_na:
             super_mask |= np.isnan(self.property_values)
@@ -97,10 +98,10 @@ class EntireRowInRangeFilter(InRangeFilter):
 
 
 class IsNotNAFilter(AbstractFilter):
-    def get_mask(self):
+    def get_mask(self, *args, **kwargs):
         return ~np.isnan(self.property_values)
 
 
 class IsNAFilter(AbstractFilter):
-    def get_mask(self):
+    def get_mask(self, *args, **kwargs):
         return np.isnan(self.property_values)

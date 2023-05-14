@@ -17,7 +17,6 @@ class TSNames(Enum):
     CLOSE = TimeSeriesNames.CLOSE.value
     DAILY_PRICES = 'daily_prices'
     MARKET_CAP = 'market_cap'
-    MONTHLY_RETURNS = 'monthly_returns'    
     VOLUME = TimeSeriesNames.VOLUME.value
 
 

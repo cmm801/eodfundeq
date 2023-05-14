@@ -26,8 +26,8 @@ TIME_SERIES_PANEL_INFO = {
     TSNames.ADJUSTED_CLOSE.value: dict(dtype=np.float32, frequency='m'),
     TSNames.CLOSE.value: dict(dtype=np.float32, frequency='m'),
     TSNames.DAILY_PRICES.value: dict(dtype=np.float32, frequency='b'),
+    TSNames.DAILY_VOLUME.value: dict(dtype=np.float32, frequency='b'),
     TSNames.MARKET_CAP.value: dict(dtype=np.float32, frequency='m'),
-    TSNames.MONTHLY_RETURNS.value: dict(dtype=np.float32, frequency='m'),
     TSNames.VOLUME.value: dict(dtype=np.float32, frequency='m'),
 }
 
@@ -110,8 +110,8 @@ class FeatureStore(object):
             return self._date_map[pd.Timestamp(date) + pd.tseries.offsets.MonthEnd(0)]
 
     def load_ohlcv_data(self):
-        ts_types = (TSNames.ADJUSTED_CLOSE, TSNames.CLOSE, TSNames.DAILY_PRICES,
-                    TSNames.MONTHLY_RETURNS, TSNames.VOLUME)
+        ts_types = (TSNames.ADJUSTED_CLOSE, TSNames.VOLUME, TSNames.CLOSE,
+                    TSNames.DAILY_PRICES, TSNames.DAILY_VOLUME)
         if np.all([t in self._time_series for t in ts_types]):
             return  # Time series are already loaded
 
@@ -120,7 +120,7 @@ class FeatureStore(object):
             default_val = 0.0 if name.value == TSNames.VOLUME.value else np.nan
             self._time_series[name.value] = default_val * self.init_pd_dataframe(**kwargs)
 
-        for idx_symbol, symbol in enumerate(self.symbols):
+        for _, symbol in enumerate(self.symbols):
             daily_ts = self.eod_helper.get_historical_data(
                 symbol, start=self.start, stale_days=self.stale_days)
             if not daily_ts.shape[0]:
@@ -136,6 +136,8 @@ class FeatureStore(object):
             idx_shared = daily_ts.index.isin(self.dates['b'])
             self._time_series[TSNames.DAILY_PRICES.value].loc[daily_ts.index[idx_shared], symbol] = \
                     daily_ts.adjusted_close.values[idx_shared].astype(np.float32)
+            self._time_series[TSNames.DAILY_VOLUME.value].loc[daily_ts.index[idx_shared], symbol] = \
+                    daily_ts.volume.values[idx_shared].astype(np.float32)
 
             # Downsample to monthly data (from daily)
             monthly_ts = tradingutils.downsample(daily_ts, frequency='M')
@@ -147,11 +149,6 @@ class FeatureStore(object):
                 idx_shared = monthly_ts.index.isin(self.dates['m'])
                 self._time_series[ts_enum.value].loc[monthly_ts.index[idx_shared], symbol] = \
                     monthly_ts[ts_enum.value].values[idx_shared].astype(np.float32)
-
-        # Also add monthly returns
-        adj_close = self._time_series[TSNames.ADJUSTED_CLOSE.value]
-        self._time_series[TSNames.MONTHLY_RETURNS.value] = \
-            -1 + adj_close / np.maximum(adj_close.shift(1).values, self.price_tol)
 
         if self.drop_empty_ts:
             self._drop_empty_time_series()
@@ -225,10 +222,10 @@ class FeatureStore(object):
         return self._time_series[TSNames.DAILY_PRICES.value]
 
     @property
-    def monthly_returns(self):
+    def daily_volume(self):
         if not len(self._time_series):
             self.load_ohlcv_data()
-        return self._time_series[TSNames.MONTHLY_RETURNS.value]
+        return self._time_series[TSNames.DAILY_VOLUME.value]
 
     @property
     def volume(self):

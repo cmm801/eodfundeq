@@ -260,7 +260,8 @@ class DatasetHelper(object):
             InRangeFilter(fs, TSNames.VOLUME.value, 
                           property_func=lambda x: x.rolling(12).quantile(0.01, interpolation='lower'),
                           low=self.filter_min_monthly_volume),
-            EntireColumnInRangeFilter(fs, TSNames.MONTHLY_RETURNS.value, high=self.filter_max_return)
+            EntireColumnInRangeFilter(fs, TSNames.ADJUSTED_CLOSE.value, high=self.filter_max_return,
+                                      property_func=lambda x: -1 + x / x.shift(1).values),
         ]
         
     def set_default_filters_daily(self):
