@@ -16,6 +16,7 @@ class TSNames(Enum):
     ADJUSTED_CLOSE = TimeSeriesNames.ADJUSTED_CLOSE.value
     CLOSE = TimeSeriesNames.CLOSE.value
     DAILY_PRICES = 'daily_prices'
+    DAILY_VOLUME = 'daily_volume'
     MARKET_CAP = 'market_cap'
     VOLUME = TimeSeriesNames.VOLUME.value
 
