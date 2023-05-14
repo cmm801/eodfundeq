@@ -1,11 +1,7 @@
-eodhistdata.egg==info
-findatadownload.egg==info
 lightgbm==3.3.5
 numpy==1.23.5
 pandas==1.5.1
 pandas_market_calendars==4.1.4
-pyfintools.egg==info
 scipy==1.10.1
-secdb.egg==info
 setuptools==67.3.2
 statsmodels==0.13.5
