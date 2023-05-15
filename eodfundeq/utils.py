@@ -185,3 +185,19 @@ def get_cv_grid_args(params_grid):
         params_list = new_params_list
 
     return params_list
+
+def get_date_offset(frequency):
+    """Get the date offset appropriate for a particular frequency."""
+    if frequency == 'd':
+        offset = pd.tseries.offsets.Day()
+    elif frequency == 'b':
+        offset = pd.tseries.offsets.BusinessDay()
+    elif frequency == 'w':
+        offset = pd.tseries.offsets.Week()
+    elif frequency == 'm':
+        offset = pd.tseries.offsets.MonthEnd()
+    elif frequency == 'y':
+        offset = pd.tseries.offsets.Year()
+    else:
+        raise NotImplementedError(f'Unsupported frequency: {frequency}')
+    return offset
