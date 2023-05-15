@@ -81,7 +81,39 @@ class TrainingIntervalsCustom(TrainingIntervalsAbstract):
             DatasetTypes.TEST: (self.start_test, self.end_test),
         }
 
-    
+
+class RollingTrainingIntervals(TrainingIntervalsCustom):
+    """Class that produces a set of rolling test/train intervals."""
+    def __init__(self, start_train, end_train, end_test, fit_freq='y', expanding=True):
+        super().__init__(start_train=start_train, end_train=end_train,
+                         start_valid=end_train, end_valid=end_train,
+                         start_test=end_train, end_test=end_test)
+        self.fit_freq = fit_freq
+        self.expanding = expanding
+
+    # Implement abstract method
+    def get_all_intervals(self):
+        """Returns a list of dicts mapping from Dataset type to start/end date tuple."""        
+        date_offset = utils.get_date_offset(frequency=self.fit_freq)
+        period_ends = pd.date_range(self.end_train, self.end_test - date_offset,
+                                    freq=self.fit_freq)
+        if not self.expanding:
+            training_window = self.end_train - self.start_train
+
+        rolling_intervals = []
+        start_train = self.start_train
+        for end_train in period_ends:
+            if not self.expanding:
+                start_train = end_train - training_window
+
+            interval = TrainingIntervalsCustom(
+                start_train=start_train, end_train=end_train,
+                start_valid=end_train, end_valid=end_train,
+                start_test=end_train, end_test=end_train + date_offset)
+            rolling_intervals.append(interval)
+        return rolling_intervals
+
+
 class Dataset(object):
     def __init__(self, X: pd.DataFrame, y: Optional[pd.DataFrame] = None,
                  metadata: Optional[pd.DataFrame] = None, is_sorted=False):
@@ -397,7 +429,6 @@ class DatasetHelper(object):
         eval_set = []
         timestamps = dataset.timestamp.values
         for t in sorted(set(timestamps)):
-            idx_t = (t == timestamps)
             X = dataset.X.loc[t == timestamps, feature_names]
             y = dataset.y.loc[t == timestamps]
             eval_set.append((X, y))
