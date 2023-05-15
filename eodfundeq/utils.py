@@ -197,7 +197,7 @@ def get_date_offset(frequency):
     elif frequency == 'm':
         offset = pd.tseries.offsets.MonthEnd()
     elif frequency == 'y':
-        offset = pd.tseries.offsets.Year()
+        offset = pd.tseries.offsets.YearEnd()
     else:
         raise NotImplementedError(f'Unsupported frequency: {frequency}')
     return offset

@@ -375,13 +375,16 @@ class DatasetHelper(object):
         return df
 
     def _add_dataset_type(self, df):
+        """Add a 'dataset_type' column to the input Data Frame."""
         df.set_index('timestamp', inplace=True)
         df.sort_index(inplace=True)
         df['dataset_type'] = ''
+        date_offset = utils.get_date_offset(self.frequency)
         intervals = self.training_intervals.get_all_intervals()
         for dataset_type, interval in intervals.items():
             start, end = interval
-            df.loc[start:end, 'dataset_type'] = dataset_type.value
+            # Add offset to start so that first date is not included
+            df.loc[start+date_offset:end, 'dataset_type'] = dataset_type.value
         return df.reset_index()
 
     def get_lgbmranker_groups(self, dataset):
