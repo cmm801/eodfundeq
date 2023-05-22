@@ -58,7 +58,7 @@ class FeatureStore(object):
         self.dates = {'m': pd.date_range(self.start, self.end, freq='m')}            
         business_days = market_calendar.valid_days(self.start, self.end)
         self.dates['b'] = pd.DatetimeIndex([x.tz_convert(None) for x in business_days])
-        
+
         # initialize hash table to look up date locations
         self._date_map = {f: pd.Series({self.dates[f][j]: j for j in range(len(self.dates[f]))},
              dtype=int) for f in self.frequencies}
@@ -73,7 +73,7 @@ class FeatureStore(object):
 
         # Initialize cached time series data
         self._cta_momentum_signals = None
-            
+
         # Initialize financial statement data types
         self.fin_data_types = sorted(FUNDAMENTAL_RATIO_INPUTS)
 
@@ -82,7 +82,7 @@ class FeatureStore(object):
 
         # Initialize container for caching calculated fundamental ratios
         self._fundamental_ratios = None        
-        
+
         # Other parameters
         self.price_tol = 1e-4           # Used to make sure we don't divide by 0
         self.fundamental_data_delay = 1 # Months to delay use of fundamental data, to account for
@@ -190,7 +190,7 @@ class FeatureStore(object):
         if mc_name in self._time_series:
             return  # Time series already loaded
         self._time_series[mc_name] = np.nan * self.init_pd_dataframe(**kwargs)
-        for idx_symbol, symbol in enumerate(self.symbols):
+        for _, symbol in enumerate(self.symbols):
             raw_ts = self.eod_helper.get_market_cap(
                 symbol, start=self.start, stale_days=self.stale_days)
             if not raw_ts.shape[0]:
@@ -238,7 +238,7 @@ class FeatureStore(object):
         if TSNames.MARKET_CAP.value not in self._time_series:
             self.load_market_cap_data()
         return self._time_series[TSNames.MARKET_CAP.value]
-    
+
     def get_future_returns(self, window, return_type=ReturnTypes.ARITHMETIC.value):
         levels = np.maximum(self.adjusted_close.shift(-window).values, self.price_tol) /  \
                  np.maximum(self.adjusted_close.values, self.price_tol)
@@ -360,8 +360,6 @@ class FeatureStore(object):
         L = [24, 48, 96]
         HL = lambda n : np.log(0.5) / np.log(1 - 1/n)
 
-        signals = []
-        signal_names = []
         for j in range(3):
             x = self.daily_prices.ewm(halflife=HL(S[j])).mean() - self.daily_prices.ewm(halflife=HL(L[j])).mean()
             y = x / np.maximum(self.daily_prices.rolling(63, min_periods=60).std(), self.price_tol)
@@ -437,7 +435,7 @@ class FeatureStore(object):
                 n_periods=n_periods, min_obs=min_obs, fillna=fillna)
 
             total_assets = fin_data[FundamentalDataTypes.totalAssets.value]
-            begin_period_assets = np.vstack([np.nan * self._init_data_rows(n_periods), 
+            begin_period_assets = np.vstack([np.nan * self._init_data_rows(n_periods),
                                             total_assets[:-n_periods,:]])
             return net_income / (begin_period_assets + eps)
         elif ratio_name == FundamentalRatios.ROE.value:
@@ -588,5 +586,3 @@ class FeatureStore(object):
         divs = fin_data[FundamentalDataTypes.netIncome.value]
         sale_or_purchase_of_stock = fin_data[FundamentalDataTypes.salePurchaseOfStock.value]
         return divs - sale_or_purchase_of_stock
-
-
