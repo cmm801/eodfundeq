@@ -119,7 +119,8 @@ def calc_ndcg(y_true, y_score, k=None, form='exp'):
 
     return DCG.sum() / IDCG.sum()    
 
-def cross_validate_gbm(model_handle, ds_helper, n_folds=5, k=100, direction='bull', **kwargs):
+def cross_validate_gbm_cls(model_handle, ds_helper, n_folds=5, k=100, direction='bull', **kwargs):
+    """Perform cross-validatation for gbm."""
     n_buckets = ds_helper.featureObj.n_buckets
     X = ds_helper.X['train']
     y_rtn = ds_helper.y_reg['train']
@@ -130,7 +131,7 @@ def cross_validate_gbm(model_handle, ds_helper, n_folds=5, k=100, direction='bul
     else:
         raise ValueError('Direction must be one of "bull" or "bear".')
     year_months = np.array(ds_helper.year_month['train'])  # ensure this is a numpy array
-    assert np.all(np.sort(year_months) == year_months), 'Samples should be sorted by year-month'    
+    assert np.all(np.sort(year_months) == year_months), 'Samples should be sorted by year-month'
 
     uniq_year_months = sorted(set(year_months))
     idx_bins = [int(x) for x in np.linspace(0, len(uniq_year_months), num=n_folds+1)]

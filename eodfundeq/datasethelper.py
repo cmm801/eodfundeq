@@ -17,6 +17,10 @@ class TrainingIntervalsAbstract(ABC):
     def get_all_intervals(self):
         """Returns a dict with a map from Dataset type to start/end date tuple."""
 
+    @property
+    def is_rolling(self):
+        return False
+
     def get_intervals(self, dataset_type):
         """Provide the start/end date for a specified dataset."""
         return self.get_all_intervals()[dataset_type]
@@ -91,6 +95,10 @@ class RollingTrainingIntervals(TrainingIntervalsCustom):
         self.fit_freq = fit_freq
         self.expanding = expanding
 
+    @property
+    def is_rolling(self):
+        return True
+
     # Implement abstract method
     def get_all_intervals(self):
         """Returns a list of dicts mapping from Dataset type to start/end date tuple."""        
@@ -110,7 +118,7 @@ class RollingTrainingIntervals(TrainingIntervalsCustom):
                 start_train=start_train, end_train=end_train,
                 start_valid=end_train, end_valid=end_train,
                 start_test=end_train, end_test=end_train + date_offset)
-            rolling_intervals.append(interval)
+            rolling_intervals.append(interval.get_all_intervals())
         return rolling_intervals
 
 
@@ -250,23 +258,34 @@ class DatasetHelper(object):
         return self.feature_store.symbols
 
     def get_dataframe(self, sort=False):
-        df_base = self._get_base_dataframe()
-        df = self._add_dataset_type(df_base)
-        if sort:
-            return df.sort_values('timestamp')
-        else:
-            return df
+        df = self._get_base_dataframe()
+        df.set_index('timestamp', inplace=True)
+        return df.sort_index() if sort else df
 
     def get_datagroup(self, sort=False):
+        if self.training_intervals.is_rolling:
+            raise ValueError('This method is only supported for non-rolling training intervals.')
+        return next(self.get_datagroup_iterator(sort=sort))
+
+    def get_datagroup_iterator(self, sort=False):
         df = self.get_dataframe(sort=sort)
-        ds_group_args = {}
-        for ds_type in DatasetTypes:
-            sub_df = df.loc[df.dataset_type.values == ds_type.value]
-            ds_group_args[ds_type] = Dataset(X=sub_df[self.feature_names],
-                                             y=sub_df.y,
-                                             metadata=sub_df[self.metadata_names],
-                                             is_sorted=sort)
-        return ds_group_args
+        if self.training_intervals.is_rolling:
+            rolling_intervals = self.training_intervals.get_all_intervals()
+        else:
+            rolling_intervals = [self.training_intervals.get_all_intervals()]
+
+        date_offset = utils.get_date_offset(self.frequency)
+        for rolling_interval in rolling_intervals:
+            ds_group_args = {}
+            for dataset_type, interval in rolling_interval.items():
+                start, end = interval
+
+                # Add offset to start so that first date is not included
+                sub_df = df.loc[start+date_offset:end].reset_index()
+                ds_group_args[dataset_type] = Dataset(
+                    X=sub_df[self.feature_names], y=sub_df.y,
+                    metadata=sub_df[self.metadata_names], is_sorted=sort)
+            yield ds_group_args
 
     def set_default_filters(self):
         self._good_mask = None
@@ -372,8 +391,6 @@ class DatasetHelper(object):
         if len(set([x.size for x in features_df_list])) != 1:
             raise ValueError('Features are of different lengths')
         df_features = pd.concat(features_df_list, axis=1)
-        if self.forecast_type == ForecastTypes.LOG_VOLATILITY.value:
-            df_features = np.log(np.maximum(df_features, self.volatility_tol))
         return df_features
 
     def create_panel_from_time_series(self, ts):
@@ -405,19 +422,6 @@ class DatasetHelper(object):
         df.sort_values(['timestamp', 'symbol'], inplace=True)
         df.reset_index(inplace=True, drop=True)
         return df
-
-    def _add_dataset_type(self, df):
-        """Add a 'dataset_type' column to the input Data Frame."""
-        df.set_index('timestamp', inplace=True)
-        df.sort_index(inplace=True)
-        df['dataset_type'] = ''
-        date_offset = utils.get_date_offset(self.frequency)
-        intervals = self.training_intervals.get_all_intervals()
-        for dataset_type, interval in intervals.items():
-            start, end = interval
-            # Add offset to start so that first date is not included
-            df.loc[start+date_offset:end, 'dataset_type'] = dataset_type.value
-        return df.reset_index()
 
     def get_lgbmranker_groups(self, dataset):
         # Get the # of samples in each group (aka the # of stocks for each date)

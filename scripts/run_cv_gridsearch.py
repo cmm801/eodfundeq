@@ -70,7 +70,7 @@ def main(argv):
 
     for j, gkwargs in enumerate(grid_kwargs):
         print(f'Iteration {j}')
-        scores, rtns, _ = utils.cross_validate_gbm(
+        scores, rtns, _ = utils.cross_validate_gbm_cls(
             lgb.LGBMRanker, ds_helper, n_folds=5, direction=args.direction, **gkwargs)
 
         # Read existing params, add result, and re-write to file
