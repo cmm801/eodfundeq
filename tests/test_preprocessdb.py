@@ -50,7 +50,8 @@ class UtilsTest(unittest.TestCase):
 
         # Create one extra volatility panel
         datapanel = self._create_random_df(freq='b', rand_state=self.rand_state)
-        self.data_list.append({'data': datapanel, 'frequency': 'b', 'datatype': 'volatility'})
+        self.data_list.append({'data': datapanel, 'frequency': 'b', 'datatype': 'volatility',
+                               'data_source': 'synthetic'})
 
     def _save_data_to_temp_dir(self):
         """Save the data panels to the directory."""
@@ -101,6 +102,18 @@ class UtilsTest(unittest.TestCase):
             df_close = df_meta.query('datatype == "close"')
             self.assertTrue(np.all(np.arange(0, 3) == df_close.version.values))
 
+    def test_extra_metadata(self):
+        df_meta = self.db_helper.get_metadata()
+        mask = ~np.array([isinstance(x, float) and np.isnan(x) for x in df_meta.data_source.values])
+        sub_df = df_meta.loc[mask]
+
+        with self.subTest(name='shape'):
+            self.assertEqual(sub_df.shape[0], 1)
+
+        with self.subTest(name='data_source'):
+            self.assertEqual(sub_df.data_source.values[0], 'synthetic')
+
+        
 
 if __name__ == '__main__':
     unittest.main()

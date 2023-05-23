@@ -12,17 +12,13 @@ class PreprocessedDBHelper(object):
     def __init__(self, base_path):
         self.base_path = base_path
 
-    def get_metadata_path(self):
-        """Get the path to the file containing the metadata for all time series panels."""
-        return os.path.join(self.base_path, 'preprocessed')
-
     def get_metadata_filename(self):
         """Get name of file containing the metadata for all time series panels."""
-        return os.path.join(self.get_metadata_path(), 'metadata.csv')
+        return os.path.join(self.base_path, 'metadata.csv')
 
     def get_datatype_path(self, datatype=''):   # pylint: disable=unused-argument
         """Get path to file containing time series panel for a specific data type."""
-        return self.get_metadata_path()
+        return self.base_path
 
     def get_metadata(self):
         """Get a DataFrame containing metadata for all time series panels."""
@@ -34,7 +30,7 @@ class PreprocessedDBHelper(object):
 
     def append_metadata(self, dp_obj):
         """Update the meta data file that keeps track of all saved data panels."""
-        new_row = pd.DataFrame([dict(
+        base_data = dict(
             datatype=dp_obj.datatype,
             start=dp_obj.start,
             end=dp_obj.end,
@@ -44,7 +40,10 @@ class PreprocessedDBHelper(object):
             version=dp_obj.version,
             created=dp_obj.created,
             n_symbols=dp_obj.n_symbols
-        )])
+        )
+
+        # Create a 1-row DataFrame with the new data
+        new_row = pd.DataFrame([base_data | dp_obj.extra_metadata])
 
         df_meta = self.get_metadata()
         if not df_meta.size:
@@ -55,10 +54,10 @@ class PreprocessedDBHelper(object):
         # Save to csv
         df_meta.to_csv(self.get_metadata_filename(), index=False)
 
-    def save_data(self, data, datatype, frequency, file_format='parquet'):
+    def save_data(self, data, datatype, frequency, file_format='parquet', **kwargs):
         """Save the data panel information."""
         dp_obj = PreprocessedDataPanel(db_helper=self, data=data, datatype=datatype, 
-                                       frequency=frequency, file_format=file_format)
+                                       frequency=frequency, file_format=file_format, **kwargs)
         self.save_data_from_object(dp_obj)
 
     def save_data_from_object(self, dp_obj):
@@ -128,12 +127,13 @@ class PreprocessedDBHelper(object):
 class PreprocessedDataPanel(object):
     """Class to help save preprocessed data panels."""
 
-    def __init__(self, db_helper, data, datatype, frequency, file_format='parquet'):
+    def __init__(self, db_helper, data, datatype, frequency, file_format='parquet', **kwargs):
         self.data = data.sort_index()
         self.datatype = datatype
         self.frequency = frequency
         self.db_helper = db_helper
         self.file_format = file_format
+        self.extra_metadata = kwargs
         self._version = None
 
         self.start = pd.Timestamp(self.data.index.values[0])
