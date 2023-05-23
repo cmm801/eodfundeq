@@ -47,7 +47,7 @@ class UtilsTest(unittest.TestCase):
             for datatype, freq in self.datatype_freq_map.items():
                 datapanel = self._create_random_df(freq=freq, rand_state=self.rand_state)
                 self.data_list.append({'data': datapanel, 'frequency': freq, 'datatype': datatype})
-        
+
         # Create one extra volatility panel
         datapanel = self._create_random_df(freq='b', rand_state=self.rand_state)
         self.data_list.append({'data': datapanel, 'frequency': 'b', 'datatype': 'volatility'})
@@ -81,6 +81,7 @@ class UtilsTest(unittest.TestCase):
         self.assertTrue(df1.equals(df2))
 
     def test_number_of_versions(self):
+        """Test that the number of versions for each datatype is as expected."""
         with self.subTest(datatype='volatility'):
             volatility_data_list = [x for x in self.data_list if x['datatype'] == 'volatility']
             self.assertEqual(len(volatility_data_list), 4)
@@ -90,6 +91,7 @@ class UtilsTest(unittest.TestCase):
             self.assertEqual(len(close_data_list), 3)
 
     def test_version_numbers(self):
+        """Test that the version numbers match our expectation."""
         df_meta = self.db_helper.get_metadata()
         with self.subTest(datatype='volatility'):
             df_vol = df_meta.query('datatype == "volatility"')

@@ -1,3 +1,5 @@
+"""Unit tests for the utils module."""
+
 import unittest
 import sys, os
 
