@@ -85,19 +85,20 @@ class PreprocessedDBHelper(object):
             if os.path.isfile(dp_obj.filename):
                 os.remove(dp_obj.filename)
 
-    def get_panel_data(self, datatype: str,
-                       version: int = None) -> pd.DataFrame:
+    def get_panel_data(self, datatype: str, version: int = None, **kwargs) -> pd.DataFrame:
         """Get a DataFrame containing the requested time series panel."""
         df_meta = self.get_metadata()
         if not df_meta.size:
             return pd.DataFrame([])
 
-        df_meta_dt = df_meta.query(f'datatype == "{datatype}"')
-        if not df_meta_dt.size:
-            return pd.DataFrame([])
+        for name, value in ({'datatype': datatype} | kwargs).items():
+            mask = df_meta[name].values == value
+            if not np.any(mask):
+                return pd.DataFrame([])
+            df_meta = df_meta.loc[mask]
 
         if version is not None:
-            df_meta_ver = df_meta_dt.query(f'version == {version}')
+            df_meta_ver = df_meta.query(f'version == {version}')
             if not df_meta_ver.size:
                 return pd.DataFrame([])
             elif df_meta_ver.shape[0] != 1:
@@ -105,7 +106,7 @@ class PreprocessedDBHelper(object):
             else:
                 meta_row = pd.Series(df_meta_ver.iloc[0])
         else:
-            meta_row = pd.Series(df_meta_dt.sort_values('version').iloc[-1])
+            meta_row = pd.Series(df_meta.sort_values('version').iloc[-1])
 
         path = self.get_datatype_path(meta_row.datatype)
         filename = os.path.join(path, meta_row.relative_filename)

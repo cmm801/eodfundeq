@@ -3,14 +3,75 @@
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+import sklearn
 
 from abc import ABC, abstractmethod
 from typing import Optional, Union
 
 from eodfundeq import DatasetHelper
-from eodfundeq.constants import ModelTypes
+from eodfundeq.constants import DatasetTypes, ModelTypes
 
 import pyfintools.tools.fts
+
+
+class RollingForecastModel(object):
+    def __init__(self, model, ds_helper, feature_names=None, clone_model=True, subsample=1.0):
+        self.model = model
+        self.ds_helper = ds_helper
+        self.feature_names = feature_names
+        self.clone_model = clone_model
+        self.subsample = subsample
+
+        self.model_list = []
+        self.pred_list = []
+
+    def fit(self):
+        if self.model_list:
+            return
+
+        datagroup_iter = self.ds_helper.get_datagroup_iterator(sort=True)
+        for _, datagroup in enumerate(datagroup_iter):
+            if self.clone_model:
+                period_model = sklearn.base.clone(self.model)
+            else:
+                period_model = self.model
+
+            y_train = datagroup[DatasetTypes.TRAIN].y
+            X_train = datagroup[DatasetTypes.TRAIN].X
+
+            # Take a subsample
+            n_samples = int(self.subsample * y_train.shape[0])
+            idx = np.random.choice(y_train.shape[0], n_samples, replace=False)
+            y_train = y_train.loc[idx]
+            X_train = X_train.loc[idx]
+
+            dg_test = datagroup[DatasetTypes.TEST]
+            y_test = dg_test.y
+            X_test = dg_test.X
+            timestamps = dg_test.timestamp.values
+            symbols = dg_test.symbol.values
+            if not y_test.size:
+                continue
+
+            if self.feature_names is not None:
+                X_train = X_train[self.feature_names]
+                X_test = X_test[self.feature_names]
+
+            period_model.fit(X_train, y_train)
+            y_test_pred = period_model.predict(X_test)
+
+            df_period = pd.DataFrame(
+                np.vstack([y_test.values, y_test_pred, timestamps, symbols]).T,
+                index=y_test.index,
+                columns=['true', 'pred', 'timestamp', 'symbol'])
+
+            self.pred_list.append(df_period)
+            self.model_list.append(period_model)
+
+    def get_predictions(self):
+        if not len(self.pred_list):
+            raise ValueError('Must call "fit" method first to get predictions.')
+        return pd.concat(self.pred_list, axis=0)
 
 
 class PredictionModel(ABC):
@@ -212,3 +273,19 @@ class MetaModelBear(MetaModelAbstract):
     @property
     def direction(self):
         return ModelTypes.BEAR
+
+
+class SingleFeatureModel(object):
+    def __init__(self, feature_name):
+        self.feature_name = feature_name
+        
+    # Implement this so that we can clone the model
+    def get_params(self, **kwargs):
+        return dict(feature_name=self.feature_name)
+
+    def fit(self, X, y):
+        pass
+    
+    def predict(self, X):
+        return X[self.feature_name]
+    

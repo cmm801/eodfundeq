@@ -4,7 +4,7 @@ import pandas as pd
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from eodfundeq.constants import DatasetTypes, ForecastTypes, ModelTypes, TSNames, TRADING_DAYS_PER_YEAR
+from eodfundeq.constants import DatasetTypes, ForecastTypes, ModelTypes, TSNames, TRADING_DAYS_PER_YEAR, TRADING_DAYS_PER_MONTH
 from eodfundeq import utils
 
 from eodfundeq.filters import EqualFilter, InRangeFilter, EntireColumnInRangeFilter, IsNotNAFilter
@@ -199,7 +199,7 @@ class DatasetHelper(object):
         self.volatility_tol = 0.01  # lower bound on vol to prevent taking Log(0)
 
         # Initialize dict to cache volatility calculations
-        self._volatility_cache = {}
+        self._volatility_forecast = {}
 
         # Initialize mask that will tell us if data points are valid
         self._good_mask = None
@@ -335,19 +335,20 @@ class DatasetHelper(object):
         self._good_mask = None
         self._filters.append(f)
 
-    def _get_volatility_forecast(self, n_months):
-        if n_months not in self._volatility_cache:
-            if n_months == 1:
-                n_days, min_obs = 63, 60
-            elif n_months == 3:
-                n_days, min_obs = 126, 120
-            elif n_months == 6:
-                n_days, min_obs = 252, 240
-            else:
-                raise NotImplementedError('The volatility window corresponding to this return window has not been chosen.')
-
-            self._volatility_cache[n_months] = self.feature_store.get_volatility(n_days, min_obs=min_obs)
-        return np.maximum(self._volatility_cache[n_months], 0.03)
+    def get_volatility_forecast(self, model_name='realized'):  # pylint: disable=unused-argument
+        """Returns volatility forecast over the forecast_horizoin based on specified model."""
+        if model_name not in self._volatility_forecast:
+            if model_name != 'realized':
+                raise NotImplementedError(f'Volatility model name not implemented: {model_name}')
+            n_day_horizon = TRADING_DAYS_PER_MONTH * (3 if self.forecast_horizon < 6 else 2)
+            min_obs = int(self.min_data_fraction * n_day_horizon)
+            volatility = self.feature_store.get_volatility(n_day_horizon, min_obs=min_obs)
+            if self.frequency == 'm':
+                volatility = volatility.resample('M').last()
+            elif self.frequency != 'b':
+                raise ValueError(f'Unsupported frequency: {self.frequency}')
+            self._volatility_forecast[model_name] = self.feature_store.align_panel(volatility)
+        return np.maximum(self._volatility_forecast[model_name], self.volatility_tol)
 
     def flatten_panel(self, panel):
         """Takes a data panel and flattens it into a single-column."""
@@ -373,15 +374,21 @@ class DatasetHelper(object):
     def _get_return_labels(self):
         y_panel = self.feature_store.get_future_returns(self.forecast_horizon)
         if self.forecast_type == ForecastTypes.NORM_RETURNS.value:
-            volatility = self._get_volatility_forecast(self.forecast_horizon)
-            y_panel /= volatility
+            volatility = self.get_volatility_forecast()
+            y_panel = y_panel / volatility.values
 
         if self.n_buckets > 0:
             y_panel = utils.bucket_features(y_panel, self.n_buckets, axis=1)
         return y_panel
 
     def add_feature_panel(self, feature_name, feature_panel):
+        """Add a single time series panel to the instance."""
         self.features_dict[feature_name] = self.flatten_panel(feature_panel)
+
+    def add_features_from_dict(self, other_features_dict):
+        """Add a dict of time series feature panels to the instance."""
+        for feature_name, feature_panel in other_features_dict.items():
+            self.add_feature_panel(feature_name, feature_panel)
 
     def _get_features(self):
         features_df_list = []

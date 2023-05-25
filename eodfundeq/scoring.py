@@ -13,48 +13,24 @@ from eodfundeq.constants import ModelTypes, ReturnTypes, RFR_SYMBOL
 from eodfundeq import utils
 
 
-def get_selected_log_returns(model, dataset, daily_prices, n_stocks=100, price_tol=1e-6):
-    return get_selected_returns(
-        model, dataset, daily_prices, return_type=ReturnTypes.LOG, n_stocks=n_stocks, price_tol=price_tol)
-
-def get_selected_arith_returns(model, dataset, daily_prices, n_stocks=100, price_tol=1e-6):
-    return get_selected_returns(
-        model, dataset, daily_prices, return_type=ReturnTypes.ARITHMETIC, n_stocks=n_stocks, price_tol=price_tol)
-
-def get_selected_returns(model, dataset, daily_prices, return_type, n_stocks=100, price_tol=1e-6):
-    assert return_type in ReturnTypes
+def get_selected_symbols(model, dataset, n_stocks=100):
     timestamps = dataset.timestamp
-    true_rtns_list = []
     selected_symbols_list = []
     period_ends = []
     sorted_timestamps = sorted(set(timestamps))
     for timestamp in sorted_timestamps:
-        idx_t = (timestamp == timestamps)
-        symbols_t = dataset.symbol.loc[idx_t]        
+        idx_t = timestamp == timestamps
+        symbols_t = dataset.symbol.loc[idx_t]
         y_score = model.predict(dataset.X.loc[idx_t,:])
         df_scores = pd.Series(y_score.flatten(), index=symbols_t)
         df_scores.sort_values(inplace=True, ascending=False)
         selected_symbols = df_scores.index.values[:n_stocks]
+        selected_symbols_list.append(selected_symbols)
         period_end = timestamp + pd.tseries.offsets.MonthEnd(0)
         period_ends.append(period_end)
-        period_start = period_end - pd.Timedelta(91, unit='d')
-        idx_period = (period_start <= daily_prices.index) & (daily_prices.index <= period_end)
-        period_prices = daily_prices.loc[idx_period, selected_symbols]
-        price_ratio = np.maximum(period_prices, price_tol) / \
-                      np.maximum(period_prices.shift(1), price_tol)
-        if return_type == ReturnTypes.LOG:
-            rtns = np.log(price_ratio)
-        else:
-            rtns = -1 + price_ratio
-        rtns = rtns.iloc[1:,:]
-        assert np.isnan(rtns.values).sum(axis=0).max() < 10
-        true_rtns = pd.Series(dataset.true_return.loc[idx_t].values, index=symbols_t)
-        true_rtns_list.append(true_rtns.loc[selected_symbols].values)
-        selected_symbols_list.append(selected_symbols)
 
-    df_rtns = pd.DataFrame(true_rtns_list, index=pd.DatetimeIndex(period_ends))
     df_symbols = pd.DataFrame(selected_symbols_list, index=pd.DatetimeIndex(period_ends))
-    return df_rtns, df_symbols
+    return df_symbols
 
 def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15,
                          n_stocks=100, weighting='equal'):
@@ -64,7 +40,7 @@ def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15,
         a tuple where the first element is the strategy weights, and the second
         element is the weights on the risk-free instrument.
     """
-    _, df_symbols = get_selected_arith_returns(model, dataset, daily_prices, n_stocks=n_stocks)
+    df_symbols = get_selected_symbols(model, dataset, n_stocks=n_stocks)
     risk_free_weights = pd.Series(np.zeros_like(df_symbols.index, dtype=float),
                                   index=df_symbols.index)
     weights_list = []
@@ -117,8 +93,8 @@ def _calculate_covariance(daily_prices, period_end, symbols, n_days=91, price_to
 def get_performance(model, dataset, daily_prices, return_window,
                     n_stocks=100, weighting='equal', rf_returns=None):
     """Calculate the performance of the model using the specified weighting strategy."""
-    _, df_symbols = get_selected_log_returns(
-        model, dataset, daily_prices, n_stocks=n_stocks)
+    df_symbols = get_selected_symbols(
+        model, dataset, n_stocks=n_stocks)
     strat_wts, rf_wts = get_strategy_weights(
         model, dataset, daily_prices, weighting=weighting)
 
@@ -187,7 +163,7 @@ def get_ndcg(model, dataset, n_buckets, n_stocks=100):
     for timestamp in sorted_timestamps:
         idx_t = timestamp == timestamps
         y_score = model.predict(dataset.X.loc[idx_t,:]).flatten()
-        y_true = dataset.y_cls.loc[idx_t].values
+        y_true = dataset.y.loc[idx_t].values
         if model.direction == ModelTypes.BEAR:
             y_true = n_buckets - 1 - y_true
         ndcg_val = utils.calc_ndcg(y_true, y_score, k=n_stocks, form='exp')
