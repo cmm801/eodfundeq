@@ -202,3 +202,11 @@ def get_date_offset(frequency):
     else:
         raise NotImplementedError(f'Unsupported frequency: {frequency}')
     return offset
+
+def convert_column_to_panel(value, index, column):
+    """Convert column data into a time series panel."""
+    ts_long = pd.concat([pd.Series(index, dtype='datetime64[ns]'),
+                         pd.Series(value, dtype='float'),
+                         pd.Series(column, dtype='str')], axis=1)
+    ts_long.columns=['index', 'value', 'column']
+    return ts_long.pivot(index='index', values='value', columns='column').sort_index()

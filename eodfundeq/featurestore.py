@@ -3,24 +3,26 @@
 This file contains the core logic used for the analysis.
 """
 
+import os
 import numpy as np
 import pandas as pd
 import pandas_market_calendars
 import scipy.stats
 
-from collections.abc import Iterable
-from enum import Enum
-
 import findatadownload
 import pyfintools.tools.freq
 from pyfintools.tools import tradingutils
 
+from eodfundeq.preprocessdb import PreprocessedDBHelper
 from eodfundeq import utils
 from eodfundeq.constants import ReturnTypes, FundamentalRatios, FUNDAMENTAL_RATIO_INPUTS, RFR_SYMBOL, TSNames, TRADING_DAYS_PER_MONTH, TRADING_DAYS_PER_YEAR
 
 from eodhistdata import EODHelper, FundamentalEquitySnapshot, FundamentalEquityTS
 from eodhistdata.constants import FundamentalDataTypes, TimeSeriesNames
 
+
+OHLCV_DATA_TYPES = (TSNames.ADJUSTED_CLOSE, TSNames.VOLUME, TSNames.CLOSE,
+                    TSNames.DAILY_PRICES, TSNames.DAILY_VOLUME)
 
 TIME_SERIES_PANEL_INFO = {
     TSNames.ADJUSTED_CLOSE.value: dict(dtype=np.float32, frequency='m'),
@@ -32,13 +34,17 @@ TIME_SERIES_PANEL_INFO = {
 }
 
 class FeatureStore(object):
-    def __init__(self, api_token, base_path, start, end='', symbols=None, 
-                 n_val_periods=24, n_test_periods=24, stale_days=240, drop_empty_ts=True):
-        self.eod_helper = EODHelper(api_token=api_token, base_path=base_path)
-        self.n_val_periods = n_val_periods        
-        self.n_test_periods = n_test_periods
+    """Class that helps to fetch, format and clean feature data."""
+
+    def __init__(self, eod_api_token, base_path, start, end='', symbols=None, 
+                 stale_days=240, drop_empty_ts=True, use_saved_ohlcv_data=False):
+        self.base_path = base_path
+        self.eod_helper = EODHelper(api_token=eod_api_token, base_path=self.base_path)
         self.stale_days = stale_days
         self.drop_empty_ts = drop_empty_ts
+        self.use_saved_ohlcv_data = use_saved_ohlcv_data
+
+        self.ohlcv_dir = os.path.join(self.base_path, 'preprocessed')
 
         self.start = pd.Timestamp(start)
         if not end:
@@ -69,24 +75,18 @@ class FeatureStore(object):
             self.symbols = np.array(symbols)
 
         # Initialize the time series panels
-        self._time_series = dict()
-
-        # Initialize cached time series data
+        self._ohlcv_data = {}
+        self._time_series = {}
+        self._fundamental_ratios = {}
         self._cta_momentum_signals = None
 
         # Initialize financial statement data types
         self.fin_data_types = sorted(FUNDAMENTAL_RATIO_INPUTS)
 
-        # Initialize container for caching calculated volatility
-        self._volatility = dict()
-
-        # Initialize container for caching calculated fundamental ratios
-        self._fundamental_ratios = None        
-
         # Other parameters
         self.price_tol = 1e-4           # Used to make sure we don't divide by 0
         self.fundamental_data_delay = 1 # Months to delay use of fundamental data, to account for
-                                        # the fact that it is not immediately available for trading. 
+                                        # the fact that it is not immediately available for trading.
 
     @property
     def fundamental_ratios(self):
@@ -110,15 +110,45 @@ class FeatureStore(object):
             return self._date_map[pd.Timestamp(date) + pd.tseries.offsets.MonthEnd(0)]
 
     def load_ohlcv_data(self):
-        ts_types = (TSNames.ADJUSTED_CLOSE, TSNames.VOLUME, TSNames.CLOSE,
-                    TSNames.DAILY_PRICES, TSNames.DAILY_VOLUME)
-        if np.all([t in self._time_series for t in ts_types]):
+        """Load the OHLCV time series data."""
+        if np.all([t.value in self._ohlcv_data for t in OHLCV_DATA_TYPES]):
             return  # Time series are already loaded
 
-        for name in ts_types:
+        if self.use_saved_ohlcv_data:
+            self._load_preprocessed_ohlcv_data()
+        else:
+            self._load_ohlcv_data_from_single_stock_files()
+
+    def save_ohlcv_data(self):
+        """Save the OHLCV data to individual files."""
+        db_helper = PreprocessedDBHelper(self.ohlcv_dir)
+        for datatype_enum in OHLCV_DATA_TYPES:
+            datatype = datatype_enum.value
+            ts = self._ohlcv_data[datatype]
+            frequency = pyfintools.tools.freq.calc_freq(ts.index).lower()
+            db_helper.save_data(ts, datatype, frequency=frequency)
+
+    def _load_preprocessed_ohlcv_data(self):
+        """Load pre-processed time series panels containing the OHLCV data."""
+        db_helper = PreprocessedDBHelper(self.ohlcv_dir)
+        for datatype_enum in OHLCV_DATA_TYPES:
+            datatype = datatype_enum.value
+            self._ohlcv_data[datatype] = db_helper.get_panel_data(datatype)
+
+        self.symbols = self.daily_prices.columns.values
+        for key, ts in self._ohlcv_data.items():
+            mask = (self.start <= ts.index) & (ts.index <= self.end)
+            ts_in_range = ts.loc[mask]
+            ts_aligned = self.align_panel(ts_in_range)
+            freq = pyfintools.tools.freq.calc_freq(ts_aligned.index).lower()
+            assert np.all(ts_aligned.index.values == self.dates[freq]), 'Some dates are missing.'
+            self._ohlcv_data[key] = ts_aligned
+
+    def _load_ohlcv_data_from_single_stock_files(self):
+        for name in OHLCV_DATA_TYPES:
             kwargs = TIME_SERIES_PANEL_INFO[name.value]
             default_val = 0.0 if name.value == TSNames.VOLUME.value else np.nan
-            self._time_series[name.value] = default_val * self.init_pd_dataframe(**kwargs)
+            self._ohlcv_data[name.value] = default_val * self.init_pd_dataframe(**kwargs)
 
         for _, symbol in enumerate(self.symbols):
             daily_ts = self.eod_helper.get_historical_data(
@@ -134,9 +164,9 @@ class FeatureStore(object):
 
             # Add daily prices (adjusted closing price) to the panel
             idx_shared = daily_ts.index.isin(self.dates['b'])
-            self._time_series[TSNames.DAILY_PRICES.value].loc[daily_ts.index[idx_shared], symbol] = \
+            self._ohlcv_data[TSNames.DAILY_PRICES.value].loc[daily_ts.index[idx_shared], symbol] = \
                     daily_ts.adjusted_close.values[idx_shared].astype(np.float32)
-            self._time_series[TSNames.DAILY_VOLUME.value].loc[daily_ts.index[idx_shared], symbol] = \
+            self._ohlcv_data[TSNames.DAILY_VOLUME.value].loc[daily_ts.index[idx_shared], symbol] = \
                     daily_ts.volume.values[idx_shared].astype(np.float32)
 
             # Downsample to monthly data (from daily)
@@ -147,7 +177,7 @@ class FeatureStore(object):
             # Add each time series' data to the respective panel
             for ts_enum in (TSNames.ADJUSTED_CLOSE, TSNames.CLOSE, TSNames.VOLUME):
                 idx_shared = monthly_ts.index.isin(self.dates['m'])
-                self._time_series[ts_enum.value].loc[monthly_ts.index[idx_shared], symbol] = \
+                self._ohlcv_data[ts_enum.value].loc[monthly_ts.index[idx_shared], symbol] = \
                     monthly_ts[ts_enum.value].values[idx_shared].astype(np.float32)
 
         if self.drop_empty_ts:
@@ -181,8 +211,8 @@ class FeatureStore(object):
         valid_prices_per_symbol = (~np.isnan(self.daily_prices)).sum(axis=0).values
         idx_good_symbol = valid_prices_per_symbol >= TRADING_DAYS_PER_YEAR 
         self.symbols = self.symbols[idx_good_symbol]
-        for k, v in self._time_series.items():
-            self._time_series[k] = self._time_series[k].loc[:,self.symbols]
+        for k, v in self._ohlcv_data.items():
+            self._ohlcv_data[k] = self._ohlcv_data[k].loc[:,self.symbols]
 
     def load_market_cap_data(self):
         mc_name = TSNames.MARKET_CAP.value
@@ -205,33 +235,33 @@ class FeatureStore(object):
 
     @property
     def adjusted_close(self):
-        if not len(self._time_series):
+        if not len(self._ohlcv_data):
             self.load_ohlcv_data()
-        return self._time_series[TSNames.ADJUSTED_CLOSE.value]
+        return self._ohlcv_data[TSNames.ADJUSTED_CLOSE.value]
 
     @property
     def close(self):
-        if not len(self._time_series):
+        if not len(self._ohlcv_data):
             self.load_ohlcv_data()
-        return self._time_series[TSNames.CLOSE.value]
+        return self._ohlcv_data[TSNames.CLOSE.value]
 
     @property
     def daily_prices(self):
-        if not len(self._time_series):
+        if not len(self._ohlcv_data):
             self.load_ohlcv_data()
-        return self._time_series[TSNames.DAILY_PRICES.value]
+        return self._ohlcv_data[TSNames.DAILY_PRICES.value]
 
     @property
     def daily_volume(self):
-        if not len(self._time_series):
+        if not len(self._ohlcv_data):
             self.load_ohlcv_data()
-        return self._time_series[TSNames.DAILY_VOLUME.value]
+        return self._ohlcv_data[TSNames.DAILY_VOLUME.value]
 
     @property
     def volume(self):
-        if not len(self._time_series):
+        if not len(self._ohlcv_data):
             self.load_ohlcv_data()
-        return self._time_series[TSNames.VOLUME.value]
+        return self._ohlcv_data[TSNames.VOLUME.value]
 
     @property
     def market_cap(self):
@@ -322,6 +352,29 @@ class FeatureStore(object):
     def create_panel_from_row(self, row_data, frequency):
         """Create a data panel with copies of a data row at a point in time."""
         return np.tile(row_data.reshape(-1, 1), len(self.dates[frequency])).T
+
+    def align_panel(self, df_panel: pd.DataFrame, axis: int = -1):
+        """Align a time series panel to the rest of the panels' indices/columns.
+        
+        Arguments:
+            df_panel: a time series panel
+            axis: (-1, 0, +1) which axis to align with the FeatureStore instance.
+                Default value is -1, which will align with both axes.
+
+        Returns a copy of the input DataFrame instance.
+        """
+        df_out = df_panel.copy()
+
+        # Align dataframe to panel dates
+        if axis in (0, -1):
+            frequency = pyfintools.tools.freq.calc_freq(df_out.index).lower()
+            assert frequency in ['b', 'm'], 'Unknown frequency'
+            df_out = df_out.reindex(self.dates[frequency], axis=0)
+
+        # Align dataframe to panel columns
+        if axis in (1, -1):
+            df_out = df_out.reindex(self.symbols, axis=1)
+        return df_out
 
     def _get_fred_ts(self, base_ticker, frequency):
         ts = findatadownload.download_time_series(
@@ -417,7 +470,7 @@ class FeatureStore(object):
         return fin_data
 
     def calc_all_fundamental_ratios(self, fillna=False, n_periods=None, min_obs=4):
-        if self._fundamental_ratios is None:
+        if not len(self._fundamental_ratios):
             self._fundamental_ratios = dict()
             fin_data = self.get_financial_statement_input_data()            
             for ratio_type in FundamentalRatios:
