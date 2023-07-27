@@ -103,7 +103,7 @@ class RollingTrainingIntervals(TrainingIntervalsCustom):
     def get_all_intervals(self):
         """Returns a list of dicts mapping from Dataset type to start/end date tuple."""        
         date_offset = utils.get_date_offset(frequency=self.fit_freq)
-        period_ends = pd.date_range(self.end_train, self.end_test - date_offset,
+        period_ends = pd.date_range(self.end_train, self.end_test + date_offset,
                                     freq=self.fit_freq)
         if not self.expanding:
             training_window = self.end_train - self.start_train
@@ -236,7 +236,8 @@ class DatasetHelper(object):
 
     @training_intervals.setter
     def training_intervals(self, ti):
-        assert isinstance(ti, TrainingIntervalsAbstract), 'Unsupported input type for training_intervals.'
+        assert isinstance(ti, TrainingIntervalsAbstract), \
+            'Unsupported input type for training_intervals.'
         self._training_intervals = ti
 
     @property
@@ -293,7 +294,7 @@ class DatasetHelper(object):
             self.set_default_filters_monthly()
         if self.frequency == 'b':
             self.set_default_filters_daily()
-        
+
     def set_default_filters_monthly(self):
         fs = self.feature_store
         self._filters = [
@@ -305,16 +306,19 @@ class DatasetHelper(object):
                           property_func=lambda x: np.isnan(x).rolling(63).sum().resample('M').last()),
             IsNotNAFilter(fs, TSNames.VOLUME.value),
             InRangeFilter(fs, TSNames.CLOSE.value,
+                          property_func=lambda x: x.rolling(3, min_periods=1).min(),
                           low=self.filter_min_price),
             InRangeFilter(fs, TSNames.ADJUSTED_CLOSE.value,
+                          property_func=lambda x: x.rolling(3, min_periods=1).min(),
                           low=self.filter_min_price),
-            InRangeFilter(fs, TSNames.VOLUME.value, 
-                          property_func=lambda x: x.rolling(12).quantile(0.01, interpolation='lower'),
+            InRangeFilter(fs, TSNames.VOLUME.value,
+                          property_func=lambda x: x.rolling(12).quantile(
+                            0.01, interpolation='lower'),
                           low=self.filter_min_monthly_volume),
             EntireColumnInRangeFilter(fs, TSNames.ADJUSTED_CLOSE.value, high=self.filter_max_return,
                                       property_func=lambda x: -1 + x / x.shift(1).values),
         ]
-        
+
     def set_default_filters_daily(self):
         fs = self.feature_store        
         self._filters = [
@@ -422,25 +426,15 @@ class DatasetHelper(object):
         assert df_features.shape[0] == df_labels.shape[0]
         assert df_features.shape[0] == df_metadata.shape[0]
         df = pd.concat([df_features, df_labels, df_metadata], axis=1)
-        idx_no_nan = ~np.isnan(df_labels.y)
+        if self.n_buckets == 0:
+            # Exclude NaN values for regressions
+            idx_no_nan = ~np.isnan(df_labels.y)
+        else:
+            # If bucketing exclude bucket vals < 0 (corresponding to NAs)
+            idx_no_nan = df_labels.y >= 0
         if self.exclude_nan_features:
             idx_no_nan = idx_no_nan & np.all(~np.isnan(df_features), axis=1)
         df = df.loc[idx_no_nan, :]
         df.sort_values(['timestamp', 'symbol'], inplace=True)
         df.reset_index(inplace=True, drop=True)
         return df
-
-    def get_lgbmranker_groups(self, dataset):
-        # Get the # of samples in each group (aka the # of stocks for each date)
-        assert dataset.timestamp.is_monotonic_increasing, 'Samples should be sorted by timestamp'
-        df_t = dataset.timestamp.reset_index()
-        return df_t.groupby('timestamp').count().sort_index().to_numpy().flatten()
-
-    def get_lgbmranker_eval_set(self, dataset, feature_names):
-        eval_set = []
-        timestamps = dataset.timestamp.values
-        for t in sorted(set(timestamps)):
-            X = dataset.X.loc[t == timestamps, feature_names]
-            y = dataset.y.loc[t == timestamps]
-            eval_set.append((X, y))
-        return eval_set

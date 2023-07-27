@@ -58,7 +58,6 @@ def get_strategy_weights(model, dataset, daily_prices, target_vol=0.15,
                 w_0 = target_vol / (n_stocks * predicted_vol)
                 ptf_vol = np.sqrt(w_0 @ asset_cov @ w_0)
                 weights = w_0 * target_vol / ptf_vol
-                print(model.__class__.__name__, weighting, np.median(predicted_vol))
                 if weights.sum() > 1:
                     weights /= weights.sum()
                 risk_free_weights.loc[period_end] = 1 - weights.sum()
@@ -120,15 +119,18 @@ def get_performance(model, dataset, daily_prices, return_window,
     # available price until the end of the period.
     df_prices = daily_prices[df_weights.columns.values].ffill()
 
+    # Need to define end date before we move df_weights dates to business days
+    # because otherwise the end date might stay in the current month
+    start = df_weights.index[0]
+    end = df_weights.index[-1] + pd.tseries.offsets.MonthEnd(return_window)
+
     # Align dates of weights with pricing dates
     idx_dt = df_prices.index.get_indexer(df_weights.index, 'ffill')
     df_weights.index = df_prices.index[idx_dt]
 
     ptf = RebalanceByWeights(weights=df_weights, prices=df_prices)
     ptf.initial_value = 1.0
-    mv_ts, _ = ptf.calc_performance(
-        start=df_weights.index[0],
-        end=df_weights.index[-1] + pd.tseries.offsets.MonthEnd(return_window))
+    mv_ts, _ = ptf.calc_performance(start=start, end=end)
     return mv_ts, df_weights
 
 def get_portfolio_weights(target_wts, df_symbols, return_window):
@@ -169,4 +171,4 @@ def get_ndcg(model, dataset, n_buckets, n_stocks=100):
         ndcg_val = utils.calc_ndcg(y_true, y_score, k=n_stocks, form='exp')
         assert ndcg_val > 0
         model_period_ndcg.append(ndcg_val)
-    return np.array(model_period_ndcg)
+    return pd.Series(model_period_ndcg, index=sorted_timestamps)

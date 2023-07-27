@@ -274,7 +274,7 @@ class FeatureStore(object):
                  np.maximum(self.adjusted_close.values, self.price_tol)
         if return_type == ReturnTypes.ARITHMETIC.value:
             return -1 + levels
-        elif return_type == ReturnTypes.LOG.value:
+        if return_type == ReturnTypes.LOG.value:
             return np.log(levels)
         else:
             raise ValueError(f'Unsupported return type: {return_type}')
@@ -379,7 +379,9 @@ class FeatureStore(object):
     def _get_fred_ts(self, base_ticker, frequency):
         ts = findatadownload.download_time_series(
             data_source='fred', base_ticker=base_ticker, start=self.start)
-        ts = ts.reindex(self.dates[frequency])
+        target_index = self.dates[frequency]
+        dt_idx = target_index.union(ts.index).sort_values()
+        ts = ts.reindex(dt_idx, method='ffill').loc[target_index]
         ts = ts.squeeze()  # Convert to pandas Series
         ts.name = base_ticker
         return ts
@@ -392,7 +394,7 @@ class FeatureStore(object):
         # Need to accumulate extra returns based on elapsed days
         # (e.g., we earn risk-free-rate for 3 days over weekend but 1 day otherwise)
         n_day_diff = pd.Series(np.hstack([
-            [np.nan], 
+            [np.nan],
             np.array((rfr_ts.index[1:] - rfr_ts.index[:-1]) / pd.Timedelta('1d'))
         ]), index=rfr_ts.index)
         return -1 + np.power(1 + rfr_ts.shift(1) / 365 / 100, n_day_diff)
@@ -411,10 +413,12 @@ class FeatureStore(object):
         self._cta_momentum_signals = dict()
         S = [8, 16, 32]
         L = [24, 48, 96]
-        HL = lambda n : np.log(0.5) / np.log(1 - 1/n)
+        def HL(n):
+            return np.log(0.5) / np.log(1 - 1/n)
 
         for j in range(3):
-            x = self.daily_prices.ewm(halflife=HL(S[j])).mean() - self.daily_prices.ewm(halflife=HL(L[j])).mean()
+            x = self.daily_prices.ewm(halflife=HL(S[j])).mean() - \
+                self.daily_prices.ewm(halflife=HL(L[j])).mean()
             y = x / np.maximum(self.daily_prices.rolling(63, min_periods=60).std(), self.price_tol)
             z = y / np.maximum(y.rolling(252, min_periods=240).std(), self.price_tol)
             u = x * np.exp(-np.power(x, 2) / 4) / 0.89    

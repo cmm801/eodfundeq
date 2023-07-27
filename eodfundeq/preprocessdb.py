@@ -110,6 +110,7 @@ class PreprocessedDBHelper(object):
 
         path = self.get_datatype_path(meta_row.datatype)
         filename = os.path.join(path, meta_row.relative_filename)
+        print(filename)
         return pd.read_parquet(filename, engine='pyarrow')
 
     def _get_version_number(self, datatype):

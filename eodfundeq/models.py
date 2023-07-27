@@ -48,6 +48,7 @@ class RollingForecastModel(object):
             dg_test = datagroup[DatasetTypes.TEST]
             y_test = dg_test.y
             X_test = dg_test.X
+            print(dg_test.timestamp.min(), dg_test.timestamp.max(), X_test.shape)
             timestamps = dg_test.timestamp.values
             symbols = dg_test.symbol.values
             if not y_test.size:

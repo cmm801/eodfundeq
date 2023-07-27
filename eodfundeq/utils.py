@@ -98,7 +98,11 @@ def bucket_features(array, n_buckets, axis=1):
     """Method to bucket features by their rank, according to the specified axis"""
     percentiles = calc_feature_percentiles(array, axis=axis)
     edges = np.linspace(0, 1, n_buckets+1)[:-1]
-    return -1 + np.digitize(percentiles, edges)
+    bucketed = -1 + np.digitize(percentiles, edges)
+
+    # Make sure the bucketed values are -1 if the value is NaN
+    bucketed[np.isnan(array)] = -1
+    return bucketed
 
 def calc_ndcg(y_true, y_score, k=None, form='exp'):
     df = pd.DataFrame(np.vstack([y_score.flatten(), y_true.flatten()]).T,
